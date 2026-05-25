@@ -48,7 +48,7 @@ def main() -> None:
     y -= 22
 
     c.setFont("Helvetica", 10)
-    c.drawString(40, y, "Models: OSS (Qwen2.5 OSS track) vs Frontier (OpenAI GPT-4.1 track)")
+    c.drawString(40, y, "Models: OSS (Qwen2.5 OSS track) vs Frontier (OpenRouter GPT-mini track)")
     y -= 14
     c.drawString(40, y, "Prompt mix: factual + adversarial/jailbreak + sensitive/bias")
     y -= 14

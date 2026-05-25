@@ -90,7 +90,7 @@ async def respond(
 
 def build_app() -> gr.Blocks:
     with gr.Blocks(title="AI Assistant — Frontier") as demo:
-        gr.Markdown("## AI Assistant — Frontier\nModel: Claude Sonnet 4 / GPT-4.1 | Status: Ready")
+        gr.Markdown("## AI Assistant — Frontier\nModel: OpenRouter (`~openai/gpt-mini-latest`) | Status: Ready")
         with gr.Row():
             with gr.Column(scale=3):
                 enable_web_search = gr.Checkbox(label="Enable Web Search", value=True)

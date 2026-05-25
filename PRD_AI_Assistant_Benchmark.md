@@ -1,15 +1,15 @@
 # PRD: AI Personal Assistant Benchmark Platform
 **Version:** 2.0 | **Role Context:** Founding AI/ML Engineer Assignment — Ollive AI  
 **Scope:** Production-grade, enterprise-level, security-first  
-**Changelog v2.0:** Llama Guard 3 replaces OpenAI Moderation; Qwen2.5-1.5B replaces 0.5B; SelfCheckGPT added for hallucination; async throughout; token-budget memory; A12 multi-turn eval fixed; GitHub Actions CI added; cost table pre-filled.
+**Changelog v2.1:** Frontier path standardized to OpenRouter (`~openai/gpt-mini-latest`) with OpenAI-compatible tool-calling; provider-specific legacy branches removed; docs/envs aligned to deployment reality.
 
 ---
 
 ## 1. Project Overview
 
-Build **two production-grade AI personal assistants** — one powered by an open-source model (Qwen2.5-1.5B-Instruct on HuggingFace Spaces) and one by a frontier model (Claude Sonnet 4 via Anthropic API or GPT-4.1 via OpenAI API) — and rigorously evaluate them across hallucination rate, bias, and content safety using an automated LLM-as-judge framework augmented with SelfCheckGPT for principled hallucination detection. The system must be deployable, observable, secure, and accompanied by an evaluation report with infographics.
+Build **two production-grade AI personal assistants** — one powered by an open-source model (Qwen2.5-0.5B-Instruct on HuggingFace Spaces) and one by a frontier model (OpenRouter-hosted `~openai/gpt-mini-latest`) — and rigorously evaluate them across hallucination rate, bias, and content safety using an automated LLM-as-judge framework augmented with SelfCheckGPT for principled hallucination detection. The system must be deployable, observable, secure, and accompanied by an evaluation report with infographics.
 
-**Frontier model recommendation:** Claude Sonnet 4 (`claude-sonnet-4-20250514`) — listed first in the assignment, stronger on safety benchmarks, comparable cost. GPT-4.1 is a valid alternative; swap `FRONTIER_PROVIDER` env var.
+**Frontier model recommendation:** OpenRouter `~openai/gpt-mini-latest` for stable OpenAI-compatible function calling and broad fallback routing.
 
 ---
 
@@ -26,9 +26,9 @@ ai-assistant-benchmark/
 │   │   ├── assistant.py             # Qwen2.5-1.5B inference + tool loop (async)
 │   │   ├── requirements.txt
 │   │   └── README.md                # HF Spaces card
-│   └── frontier-assistant/          # Claude Sonnet 4 / GPT-4.1 assistant
+│   └── frontier-assistant/          # OpenRouter frontier assistant
 │       ├── app.py                   # Gradio UI entry point (async)
-│       ├── assistant.py             # Anthropic/OpenAI client + tool loop (async)
+│       ├── assistant.py             # OpenRouter client + tool loop (async)
 │       └── requirements.txt
 ├── core/                            # Shared production modules
 │   ├── __init__.py
@@ -55,7 +55,7 @@ ai-assistant-benchmark/
 │   │   ├── factual.json             # 15 factual prompts with ground truth
 │   │   ├── adversarial.json         # 15 jailbreak/prompt injection prompts
 │   │   └── bias.json                # 15 bias/sensitive/stereotype prompts
-│   ├── judge.py                     # LLM-as-judge with rubric (Claude/GPT-4.1)
+│   ├── judge.py                     # LLM-as-judge with rubric (OpenRouter model)
 │   ├── selfcheck.py                 # SelfCheckGPT for hallucination scoring
 │   ├── run_eval.py                  # Single-turn evaluation orchestrator (async)
 │   ├── run_eval_multiturn.py        # Multi-turn evaluation for A12-type attacks (async)
@@ -88,11 +88,13 @@ ai-assistant-benchmark/
 # .env.example
 
 # Frontier assistant
-FRONTIER_PROVIDER=anthropic           # anthropic | openai
-ANTHROPIC_API_KEY=sk-ant-...
-ANTHROPIC_MODEL=claude-sonnet-4-20250514
-OPENAI_API_KEY=sk-...                 # Required if FRONTIER_PROVIDER=openai
-OPENAI_MODEL=gpt-4.1
+FRONTIER_PROVIDER=openrouter
+OPENROUTER_API_KEY=sk-or-v1-...
+OPENROUTER_MODEL=~openai/gpt-mini-latest
+OPENROUTER_JUDGE_MODEL=~openai/gpt-mini-latest
+OPENROUTER_BASE_URL=https://openrouter.ai/api/v1
+OPENROUTER_REFERER=https://your-project-url.example
+OPENROUTER_TITLE=Dual AI Assistant Benchmark
 
 # HuggingFace (OSS model inference + Llama Guard 3)
 HF_TOKEN=hf_...
@@ -117,7 +119,6 @@ GUARDRAIL_THRESHOLD=0.5               # Llama Guard 3 block threshold (0.0–1.0
 
 # Eval
 EVAL_OUTPUT_DIR=./eval/results
-EVAL_JUDGE_MODEL=claude-sonnet-4-20250514   # or gpt-4.1
 SELFCHECK_N_SAMPLES=3                 # SelfCheckGPT: number of independent samples
 ```
 
@@ -172,7 +173,6 @@ If `ENABLE_SEMANTIC_MEMORY=true`, also maintain a ChromaDB collection. On each t
 class ToolRegistry:
     def register(self, name: str, fn: AsyncCallable, schema: dict) -> None
     def get_openai_schemas(self) -> list[dict]    # OpenAI function calling format
-    def get_anthropic_schemas(self) -> list[dict] # Anthropic tool use format
     async def dispatch(self, name: str, args: dict) -> str
     def list_tools(self) -> list[str]
 ```
@@ -694,10 +694,9 @@ RESPONSE FORMAT (JSON only, no preamble):
 | Model | Avg Latency | p95 Latency | Tokens/Turn (est.) | Cost/Turn (est.) | Cost/1K Turns |
 |---|---|---|---|---|---|
 | Qwen2.5-1.5B (HF Spaces Free) | ~3–8s (CPU) | ~12s | ~400 | $0.00 | $0.00 |
-| Claude Sonnet 4 | ~1–2s | ~4s | ~500 | ~$0.003 | ~$3.00 |
-| GPT-4.1 (alternative) | ~1–3s | ~5s | ~500 | ~$0.003 | ~$3.00 |
+| OpenRouter `~openai/gpt-mini-latest` | ~2–10s | ~20s | ~500 | variable by routing | variable |
 
-*Claude Sonnet 4 pricing: $3/$15 per M input/output tokens. GPT-4.1: $2/$8.*  
+*OpenRouter pricing depends on selected upstream model and route. Use measured values from `summary.json` for final submission.*  
 *Actual values auto-populated during eval run via `metrics.py`. Replace estimates with measured values in the final report.*
 
 ---
@@ -736,8 +735,7 @@ httpx>=0.27.0
 tiktoken
 python-dotenv
 tavily-python
-anthropic            # for frontier assistant
-openai               # alternative frontier; also used in eval judge
+openai               # OpenRouter is OpenAI-compatible; used for frontier + judge calls
 pydantic>=2.0
 sentence-transformers # for SelfCheckGPT NLI method
 ```
@@ -882,7 +880,7 @@ Title: AI Personal Assistant Benchmark Report
 1. Executive Summary (3 lines)
 2. Models Evaluated
    - OSS: Qwen2.5-1.5B-Instruct (HF Spaces, free)
-   - Frontier: Claude Sonnet 4 / GPT-4.1 (API)
+   - Frontier: OpenRouter `~openai/gpt-mini-latest` (API)
    - Safety classifier: Llama Guard 3-1B
 3. Evaluation Methodology
    - 45 prompts across 3 categories

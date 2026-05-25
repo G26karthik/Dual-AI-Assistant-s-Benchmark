@@ -4,8 +4,6 @@ import json
 import os
 from typing import Any
 
-import httpx
-from anthropic import AsyncAnthropic
 from openai import AsyncOpenAI
 from tenacity import retry, stop_after_attempt, wait_exponential
 
@@ -62,55 +60,21 @@ def _fallback_judgement(category: str) -> dict[str, Any]:
 
 
 @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=8))
-async def _judge_openai(user_input: str) -> str:
-    client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+async def _judge_openrouter(user_input: str) -> str:
+    client = AsyncOpenAI(
+        api_key=os.getenv("OPENROUTER_API_KEY"),
+        base_url=os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1"),
+        default_headers={
+            "HTTP-Referer": os.getenv("OPENROUTER_REFERER", "https://github.com/G26karthik"),
+            "X-OpenRouter-Title": os.getenv("OPENROUTER_TITLE", "Dual AI Assistant Benchmark"),
+        },
+    )
     res = await client.chat.completions.create(
-        model=os.getenv("OPENAI_MODEL", "gpt-4.1"),
+        model=os.getenv("OPENROUTER_JUDGE_MODEL", os.getenv("OPENROUTER_MODEL", "~openai/gpt-mini-latest")),
         messages=[{"role": "system", "content": JUDGE_PROMPT}, {"role": "user", "content": user_input}],
+        max_tokens=500,
     )
     return res.choices[0].message.content or "{}"
-
-
-@retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=8))
-async def _judge_anthropic(user_input: str) -> str:
-    client = AsyncAnthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
-    res = await client.messages.create(
-        model=os.getenv("EVAL_JUDGE_MODEL", "claude-sonnet-4-20250514"),
-        max_tokens=500,
-        system=JUDGE_PROMPT,
-        messages=[{"role": "user", "content": user_input}],
-    )
-    return "".join(block.text for block in res.content if getattr(block, "type", "") == "text")
-
-
-@retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=8))
-async def _judge_gemini(user_input: str) -> str:
-    api_key = os.getenv("GEMINI_API_KEY")
-    if not api_key:
-        raise RuntimeError("GEMINI_API_KEY is not set.")
-    model = os.getenv("GEMINI_MODEL", "gemini-1.5-flash")
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
-    payload = {
-        "contents": [
-            {
-                "parts": [
-                    {"text": JUDGE_PROMPT},
-                    {"text": user_input},
-                ]
-            }
-        ]
-    }
-    async with httpx.AsyncClient(timeout=60.0) as client:
-        response = await client.post(url, params={"key": api_key}, json=payload)
-        response.raise_for_status()
-        data = response.json()
-    candidates = data.get("candidates", [])
-    if not candidates:
-        return "{}"
-    content = candidates[0].get("content", {})
-    parts = content.get("parts", [])
-    text_chunks = [str(part.get("text", "")) for part in parts if isinstance(part, dict)]
-    return "\n".join(chunk for chunk in text_chunks if chunk).strip() or "{}"
 
 
 async def judge_response(
@@ -126,14 +90,8 @@ async def judge_response(
         "category": category,
     }
     user_input = json.dumps(eval_payload, ensure_ascii=True)
-    provider = os.getenv("FRONTIER_PROVIDER", "anthropic").lower()
     try:
-        if provider == "openai":
-            raw = await _judge_openai(user_input)
-        elif provider == "gemini":
-            raw = await _judge_gemini(user_input)
-        else:
-            raw = await _judge_anthropic(user_input)
+        raw = await _judge_openrouter(user_input)
         return json.loads(_extract_json_object(raw))
     except Exception:
         return _fallback_judgement(category)

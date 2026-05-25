@@ -29,18 +29,6 @@ class ToolRegistry:
             )
         return schemas
 
-    def get_anthropic_schemas(self) -> list[Schema]:
-        schemas: list[Schema] = []
-        for name, (_, schema) in self._tools.items():
-            schemas.append(
-                {
-                    "name": name,
-                    "description": schema.get("description", ""),
-                    "input_schema": schema.get("parameters", {"type": "object", "properties": {}}),
-                }
-            )
-        return schemas
-
     async def dispatch(self, name: str, args: dict[str, Any]) -> str:
         if name not in self._tools:
             return f"Tool '{name}' is not available."

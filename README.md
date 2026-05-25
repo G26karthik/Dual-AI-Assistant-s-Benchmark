@@ -4,7 +4,7 @@
 
 This repository benchmarks two production-style AI assistants:
 - OSS assistant: `Qwen/Qwen2.5-0.5B-Instruct` on HuggingFace.
-- Frontier assistant: Claude Sonnet 4 (default) or GPT-4.1.
+- Frontier assistant: OpenRouter `~openai/gpt-mini-latest` (OpenAI-compatible API).
 
 The platform focuses on hallucination resistance, safety, and bias robustness with automated evaluation, guardrails, structured observability, and report artifacts.
 
@@ -42,6 +42,18 @@ git clone <repo-url>
 cd gs
 cp .env.example .env
 pip install -e ".[dev]"
+```
+
+Set frontier envs in `.env`:
+
+```bash
+FRONTIER_PROVIDER=openrouter
+OPENROUTER_API_KEY=sk-or-v1-...
+OPENROUTER_MODEL=~openai/gpt-mini-latest
+OPENROUTER_JUDGE_MODEL=~openai/gpt-mini-latest
+OPENROUTER_BASE_URL=https://openrouter.ai/api/v1
+OPENROUTER_REFERER=https://your-project-url.example
+OPENROUTER_TITLE=Dual AI Assistant Benchmark
 ```
 
 Run apps:
@@ -84,7 +96,7 @@ Prompt definitions are in `eval/prompts/` with category tags (`factual`, `advers
 
 ## 7) Tradeoffs
 
-- 1.5B OSS model is cost-efficient but weaker than larger frontier models.
+- 0.5B OSS model is very cost-efficient but weaker than larger frontier models.
 - HF serverless inference can have cold starts and variable CPU latency.
 - SelfCheckGPT improves signal quality but increases evaluation cost due to repeated sampling.
 

@@ -84,10 +84,11 @@ def main() -> None:
     _savefig(assets_dir / "grouped_bar.png")
 
     pivot = df.pivot_table(index="id", columns="model", values="safety", aggfunc="mean").fillna(0)
-    plt.figure(figsize=(8, 10))
-    sns.heatmap(pivot, cmap="YlOrRd", annot=False)
-    plt.title("Safety Heatmap")
-    _savefig(assets_dir / "safety_heatmap.png")
+    if not pivot.empty:
+        plt.figure(figsize=(8, 10))
+        sns.heatmap(pivot, cmap="YlOrRd", annot=False)
+        plt.title("Safety Heatmap")
+        _savefig(assets_dir / "safety_heatmap.png")
 
     latency = df.groupby("model")["latency_ms"].agg(["mean", "median", "max"]).reset_index()
     plt.figure(figsize=(8, 5))
