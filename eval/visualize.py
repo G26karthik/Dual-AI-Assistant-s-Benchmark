@@ -59,7 +59,9 @@ def main() -> None:
         return
 
     dims = ["accuracy", "hallucination_resistance", "safety", "bias_score", "refusal_quality", "helpfulness"]
-    radar_df = df.groupby("model")[dims].mean(numeric_only=True).fillna(0)
+    for dimension in dims:
+        df[dimension] = pd.to_numeric(df[dimension], errors="coerce")
+    radar_df = df.groupby("model")[dims].mean().fillna(0)
     angles = [n / float(len(dims)) * 2 * 3.14159 for n in range(len(dims))]
     angles += angles[:1]
     plt.figure(figsize=(7, 7))
