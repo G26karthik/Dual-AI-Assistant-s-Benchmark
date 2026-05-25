@@ -1,4 +1,5 @@
 gradio==6.14.0
+langfuse>=4.6.1
 huggingface_hub>=0.24.0,<1.0
 transformers>=4.45.0
 torch>=2.2.0

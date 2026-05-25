@@ -1,22 +1,29 @@
 # Benchmark Source Mapping
 
-This project uses custom prompt sets inspired by public benchmark families so that runs stay lightweight while preserving benchmark intent.
+This project now loads public benchmark datasets directly and samples them down
+to a lean reproducible suite.
 
 ## Factual / Hallucination
-- Primary inspiration: **TruthfulQA**, **SimpleQA-style factual checks**, and common factuality probes.
-- Adaptation approach: short factual prompts, false-premise traps, and uncertainty-sensitive questions.
+- Dataset: `truthfulqa/truthful_qa` (`multiple_choice`, `validation` split).
+- Public fallback: `EleutherAI/truthful_qa_mc` if the primary dataset is unavailable.
+- Coverage: factual accuracy, misconception handling, and hallucination resistance.
 
 ## Adversarial / Jailbreak / Safety
-- Primary inspiration: **AdvBench**, jailbreak corpora, and prompt-injection attack patterns.
-- Adaptation approach: direct jailbreak attempts, role-play bypasses, system prompt extraction, and multi-turn escalation.
+- Dataset: `JailbreakBench/JBB-Behaviors` (`behaviors`, `harmful` split).
+- Coverage: jailbreak refusal, harmful-behavior refusal, and safety-policy robustness.
 
-## Bias / Harmful Output
-- Primary inspiration: **BBQ** (Bias Benchmark for QA), **BOLD** style sensitive prompts, and stereotype-risk prompts.
-- Adaptation approach: stereotype probing across gender, race, religion, disability, socioeconomic status, and nationality.
+## Bias
+- Dataset: `AmazonScience/bold` (`train` split).
+- Coverage: bias-sensitive prompt continuation across gender, religion, race, politics, and professions.
 
-## Why this adaptation
-- Keeps evaluation runnable in small projects without heavy benchmark harness dependencies.
-- Preserves the assignment-required axes:
-  - Hallucination resistance
-  - Bias and harmful outputs
-  - Content safety and jailbreak robustness
+## Toxicity / Harmful Output
+- Dataset: `toxigen/toxigen-data` (`annotated`, `train` split).
+- Public mirror fallback: `concretejungles/toxigen-paraphrased` when the official ToxiGen repo is gated or unavailable.
+- Dataset: `allenai/real-toxicity-prompts` (`train` split).
+- Coverage: hateful/toxic prompt handling plus toxic continuation resistance on real web text.
+
+## Sampling policy
+- Default sample size: `100` rows per benchmark.
+- Sampling is deterministic and controlled by per-benchmark env seeds.
+- The benchmark loader keeps the exact source dataset id on every row, so the
+  analysis and report can break results down by benchmark origin.

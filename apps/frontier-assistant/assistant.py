@@ -9,6 +9,7 @@ from openai import AsyncOpenAI
 from tenacity import retry, stop_after_attempt, wait_exponential
 
 from core.memory.token_budget import TokenBudgetMemory
+from core.observability.langfuse_tracer import get_tracer
 from core.tools.calculator import calculate
 from core.tools.datetime_tool import get_datetime
 from core.tools.registry import ToolRegistry
@@ -92,12 +93,21 @@ async def _openrouter_chat(messages: list[dict[str, str]], tools: list[dict]) ->
             "X-OpenRouter-Title": os.getenv("OPENROUTER_TITLE", "Dual AI Assistant Benchmark"),
         },
     )
-    return await client.chat.completions.create(
-        model=os.getenv("OPENROUTER_MODEL", "~openai/gpt-mini-latest"),
-        messages=messages,  # type: ignore[arg-type]
-        tools=tools if tools else None,
-        max_tokens=int(os.getenv("MAX_OUTPUT_TOKENS", "1024")),
-    )
+    model_name = os.getenv("OPENROUTER_MODEL", "~openai/gpt-mini-latest")
+    tracer = get_tracer()
+    with tracer.generation(
+        "assistant.frontier.openrouter",
+        model=model_name,
+        input={"messages": messages[-3:], "tool_count": len(tools)},
+    ) as span:
+        response = await client.chat.completions.create(
+            model=model_name,
+            messages=messages,  # type: ignore[arg-type]
+            tools=tools if tools else None,
+            max_tokens=int(os.getenv("MAX_OUTPUT_TOKENS", "1024")),
+        )
+        span.update(output={"received": True})
+        return response
 
 
 async def _fallback_frontier_response(user_message: str, registry: ToolRegistry, error: Exception) -> tuple[str, list[dict[str, Any]]]:
@@ -121,30 +131,44 @@ async def generate_frontier_response(
     enable_web_search: bool = True,
     max_rounds: int = 3,
 ) -> tuple[str, list[dict[str, Any]]]:
-    registry = build_registry(enable_web_search=enable_web_search)
-    messages = memory.get_messages()
-    if not messages or messages[0]["role"] != "system":
-        messages = [{"role": "system", "content": FRONTIER_SYSTEM_PROMPT}, *messages]
+    tracer = get_tracer()
+    with tracer.span(
+        "assistant.frontier.generate",
+        input={"enable_web_search": enable_web_search, "user_message": user_message[:240]},
+    ) as span:
+        registry = build_registry(enable_web_search=enable_web_search)
+        messages = memory.get_messages()
+        if not messages or messages[0]["role"] != "system":
+            messages = [{"role": "system", "content": FRONTIER_SYSTEM_PROMPT}, *messages]
 
-    tool_trace: list[dict[str, Any]] = []
+        tool_trace: list[dict[str, Any]] = []
 
-    for _ in range(max_rounds):
-        try:
-            resp = await _openrouter_chat(messages, registry.get_openai_schemas())
-            choice = resp.choices[0].message
-            content = choice.content or ""
-            tool_calls = choice.tool_calls or []
-            if not tool_calls:
-                return content, tool_trace
-            messages.append({"role": "assistant", "content": content})
-            for call in tool_calls:
-                args = json.loads(call.function.arguments or "{}")
-                result = await registry.dispatch(call.function.name, args)
-                tool_trace.append({"tool": call.function.name, "args": args, "result": result})
-                messages.append({"role": "tool", "content": result, "tool_call_id": call.id})
-        except Exception as error:
-            fallback_text, fallback_trace = await _fallback_frontier_response(user_message, registry, error)
-            tool_trace.extend(fallback_trace)
-            return fallback_text, tool_trace
+        for _ in range(max_rounds):
+            try:
+                resp = await _openrouter_chat(messages, registry.get_openai_schemas())
+                choice = resp.choices[0].message
+                content = choice.content or ""
+                tool_calls = choice.tool_calls or []
+                if not tool_calls:
+                    span.update(output={"tool_count": len(tool_trace), "response_preview": content[:300]})
+                    return content, tool_trace
+                messages.append({"role": "assistant", "content": content})
+                for call in tool_calls:
+                    args = json.loads(call.function.arguments or "{}")
+                    result = await registry.dispatch(call.function.name, args)
+                    tool_trace.append({"tool": call.function.name, "args": args, "result": result})
+                    messages.append({"role": "tool", "content": result, "tool_call_id": call.id})
+            except Exception as error:
+                fallback_text, fallback_trace = await _fallback_frontier_response(
+                    user_message,
+                    registry,
+                    error,
+                )
+                tool_trace.extend(fallback_trace)
+                span.record_error(error)
+                span.update(output={"tool_count": len(tool_trace), "fallback": True})
+                return fallback_text, tool_trace
 
-    return "I reached the maximum tool-call rounds for this turn.", tool_trace
+        final_text = "I reached the maximum tool-call rounds for this turn."
+        span.update(output={"tool_count": len(tool_trace), "response_preview": final_text})
+        return final_text, tool_trace

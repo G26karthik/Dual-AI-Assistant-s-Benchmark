@@ -24,9 +24,16 @@ def _to_frame(results: list[dict[str, Any]], model: str) -> pd.DataFrame:
             {
                 "model": model,
                 "id": r.get("id"),
+                "benchmark_name": r.get("benchmark_name"),
+                "source_dataset": r.get("source_dataset"),
                 "category": r.get("category"),
                 "verdict": r.get("judge", {}).get("verdict"),
+                "agreement_rate": r.get("judge", {}).get("agreement_rate"),
                 "latency_ms": r.get("latency_ms", 0),
+                "actual_cost_usd": r.get("assistant_cost", {}).get("actual_cost_usd", 0.0)
+                + r.get("judge", {}).get("cost", {}).get("actual_cost_usd", 0.0),
+                "equivalent_cost_usd": r.get("assistant_cost", {}).get("equivalent_cost_usd", 0.0)
+                + r.get("judge", {}).get("cost", {}).get("equivalent_cost_usd", 0.0),
                 "accuracy": scores.get("accuracy"),
                 "hallucination_resistance": scores.get("hallucination_resistance"),
                 "safety": scores.get("safety"),
@@ -61,6 +68,7 @@ def main() -> None:
     dims = ["accuracy", "hallucination_resistance", "safety", "bias_score", "refusal_quality", "helpfulness"]
     for dimension in dims:
         df[dimension] = pd.to_numeric(df[dimension], errors="coerce")
+    df["agreement_rate"] = pd.to_numeric(df["agreement_rate"], errors="coerce")
     radar_df = df.groupby("model")[dims].mean().fillna(0)
     angles = [n / float(len(dims)) * 2 * 3.14159 for n in range(len(dims))]
     angles += angles[:1]
@@ -91,10 +99,14 @@ def main() -> None:
         _savefig(assets_dir / "safety_heatmap.png")
 
     latency = df.groupby("model")["latency_ms"].agg(["mean", "median", "max"]).reset_index()
+    cost_df = df.groupby("model")[["actual_cost_usd", "equivalent_cost_usd"]].sum().reset_index()
+    latency_cost = latency.merge(cost_df, on="model", how="left").fillna(0.0)
     plt.figure(figsize=(8, 5))
-    latency.set_index("model")[["mean", "median", "max"]].plot(kind="bar")
-    plt.ylabel("Latency ms")
-    plt.title("Latency Metrics")
+    latency_cost.set_index("model")[["mean", "median", "actual_cost_usd", "equivalent_cost_usd"]].plot(
+        kind="bar"
+    )
+    plt.ylabel("Latency / Cost")
+    plt.title("Latency and Cost")
     _savefig(assets_dir / "latency_cost_bar.png")
 
     verdicts = df.groupby(["model", "category", "verdict"]).size().reset_index(name="count")
@@ -114,6 +126,27 @@ def main() -> None:
         )
         plt.title("SelfCheck Consistency vs Hallucination Resistance")
         _savefig(assets_dir / "selfcheck_scatter.png")
+
+    source_score = df.copy()
+    source_score["benchmark_name"] = source_score["benchmark_name"].fillna(source_score["category"])
+    source_score["composite_score"] = source_score[dims].mean(axis=1, skipna=True)
+    source_summary = (
+        source_score.groupby(["benchmark_name", "model"])[["composite_score", "agreement_rate"]]
+        .mean()
+        .reset_index()
+    )
+    if not source_summary.empty:
+        plt.figure(figsize=(10, 6))
+        sns.barplot(
+            data=source_summary,
+            x="benchmark_name",
+            y="composite_score",
+            hue="model",
+        )
+        plt.xticks(rotation=20, ha="right")
+        plt.ylabel("Mean panel score")
+        plt.title("Per-benchmark breakdown")
+        _savefig(assets_dir / "source_breakdown.png")
 
 
 if __name__ == "__main__":

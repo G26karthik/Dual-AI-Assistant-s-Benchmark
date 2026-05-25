@@ -97,6 +97,10 @@ def _selfcheck_avg(df: pd.DataFrame, model: str) -> Any:
     return float(subset.mean())
 
 
+def _agreement_avg(summary: dict[str, Any], model: str) -> Any:
+    return _safe_get_metric(summary, "avg_agreement_rate", model)
+
+
 # --- Styles ----------------------------------------------------------------
 
 
@@ -192,9 +196,11 @@ def _kpi_table(
     )
     rows.append(
         [
-            "Estimated eval cost (USD)",
-            f"${_fmt_float(_safe_get_metric(summary, 'estimated_total_cost_usd', 'oss'), 5)}",
-            f"${_fmt_float(_safe_get_metric(summary, 'estimated_total_cost_usd', 'frontier'), 5)}",
+            "Actual / equivalent eval cost (USD)",
+            f"${_fmt_float(_safe_get_metric(summary, 'actual_total_cost_usd', 'oss'), 5)} / "
+            f"${_fmt_float(_safe_get_metric(summary, 'equivalent_total_cost_usd', 'oss'), 5)}",
+            f"${_fmt_float(_safe_get_metric(summary, 'actual_total_cost_usd', 'frontier'), 5)} / "
+            f"${_fmt_float(_safe_get_metric(summary, 'equivalent_total_cost_usd', 'frontier'), 5)}",
         ]
     )
     rows.append(
@@ -219,9 +225,16 @@ def _kpi_table(
     )
     rows.append(
         [
-            "SelfCheck consistency (factual, 0-1)",
-            _fmt_float(_selfcheck_avg(df, "oss"), 3),
-            _fmt_float(_selfcheck_avg(df, "frontier"), 3),
+            "Panel agreement / SelfCheck",
+            f"{_fmt_float(_agreement_avg(summary, 'oss'), 2)} / {_fmt_float(_selfcheck_avg(df, 'oss'), 3)}",
+            f"{_fmt_float(_agreement_avg(summary, 'frontier'), 2)} / {_fmt_float(_selfcheck_avg(df, 'frontier'), 3)}",
+        ]
+    )
+    rows.append(
+        [
+            "Benchmarks per model",
+            str(int(_safe_get_metric(summary, "by_model", "oss") or 0)),
+            str(int(_safe_get_metric(summary, "by_model", "frontier") or 0)),
         ]
     )
 
@@ -264,7 +277,7 @@ def _kpi_table(
 
 def _chart_row(assets_dir: Path, styles: dict[str, ParagraphStyle]) -> Table:
     radar = assets_dir / "radar_chart.png"
-    latency = assets_dir / "latency_cost_bar.png"
+    source_breakdown = assets_dir / "source_breakdown.png"
     chart_w = 3.25 * inch
     chart_h = 1.7 * inch
 
@@ -272,10 +285,10 @@ def _chart_row(assets_dir: Path, styles: dict[str, ParagraphStyle]) -> Table:
         left: Any = Image(str(radar), width=chart_w, height=chart_h, kind="proportional")
     else:
         left = Paragraph(f"<i>Missing chart: {radar.name}</i>", styles["small"])
-    if latency.exists():
-        right: Any = Image(str(latency), width=chart_w, height=chart_h, kind="proportional")
+    if source_breakdown.exists():
+        right: Any = Image(str(source_breakdown), width=chart_w, height=chart_h, kind="proportional")
     else:
-        right = Paragraph(f"<i>Missing chart: {latency.name}</i>", styles["small"])
+        right = Paragraph(f"<i>Missing chart: {source_breakdown.name}</i>", styles["small"])
 
     table = Table([[left, right]], colWidths=[chart_w + 6, chart_w + 6], hAlign="LEFT")
     table.setStyle(
@@ -314,19 +327,21 @@ def _build_story(
     story.append(
         Paragraph(
             "Two assistants share one core: token-budget memory, a small tool registry "
-            "(web search, calculator, datetime), Llama Guard 3 on input and output, and "
-            "structured per-turn logs. Web search results are injected as a system message "
-            "right before the user turn so the small OSS model stays grounded.",
+            "(web search, calculator, datetime), layered guardrails with toxicity scoring, "
+            "Langfuse-ready tracing, and structured per-turn logs. Web search results are "
+            "injected as a system message right before the user turn so the small OSS model "
+            "stays grounded.",
             styles["body"],
         )
     )
     story.append(
         Paragraph(
             "Evaluation uses three custom prompt banks (factual, adversarial, bias) inspired "
-            "by TruthfulQA, AdvBench, and BBQ. An LLM judge scores six dimensions and emits "
-            "PASS / PARTIAL / FAIL. A SelfCheckGPT-style NLI consistency check on factual "
-            "prompts gives an independent hallucination signal that does not depend on the "
-            "judge being right.",
+            "Evaluation now draws 100 rows each from TruthfulQA, ToxiGen, BOLD, "
+            "RealToxicityPrompts, and JailbreakBench. A three-judge free-tier panel scores "
+            "six dimensions, emits PASS / PARTIAL / FAIL by majority vote, and reports "
+            "agreement so weak judge consensus is visible. A SelfCheckGPT-style NLI "
+            "consistency check still runs on factual rows.",
             styles["body"],
         )
     )
@@ -340,7 +355,7 @@ def _build_story(
     story.append(
         Paragraph(
             "Left: judge-score radar across six dimensions. "
-            "Right: latency profile (mean / median / max) and estimated eval cost.",
+            "Right: per-benchmark panel-score breakdown across the public suites.",
             styles["small"],
         )
     )
@@ -350,15 +365,15 @@ def _build_story(
         _bullet_list(
             [
                 "Keep guardrails on by default. They materially improve jailbreak resistance "
-                "at sub-second cost.",
-                "Place the web-search grounding block as a system message immediately before "
-                "the user turn; this fix lands in this build.",
-                "Route low-stakes throughput traffic through the OSS path; reserve the "
-                "frontier path for high-stakes or low-context queries.",
-                "Promote SelfCheckGPT consistency to a gating signal on factual prompts: low "
-                "consistency means re-run with grounding or suppress the answer.",
-                "Repair the judge by pinning a JSON schema and adding a deterministic post-"
-                "parser, so the fallback path stops dominating the per-dimension averages.",
+                "at modest latency and near-zero actual free-tier spend on the OSS path.",
+                "Watch panel agreement, not just the majority verdict. Low agreement is an "
+                "early warning that the sample needs manual review.",
+                "Use TruthfulQA + SelfCheck together for factuality: agreement without "
+                "self-consistency is still a weak answer.",
+                "Treat the equivalent-cost column as the budget planning number. Actual "
+                "spend stays low because the panel leans on free-tier judges.",
+                "Keep the public-benchmark source mix visible in every report so wins are "
+                "not accidentally driven by one easy subset.",
             ],
             styles,
         )

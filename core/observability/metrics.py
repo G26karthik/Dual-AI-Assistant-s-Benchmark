@@ -19,6 +19,8 @@ class MetricsCollector:
                 "p50_latency_ms": 0.0,
                 "p95_latency_ms": 0.0,
                 "total_tokens": 0,
+                "actual_cost_usd": 0.0,
+                "equivalent_cost_usd": 0.0,
                 "estimated_cost_usd": 0.0,
                 "guardrail_blocks": 0,
                 "tool_call_count": 0,
@@ -35,7 +37,23 @@ class MetricsCollector:
             for entry in self.entries
             if isinstance(entry.get("tokens"), dict)
         ]
-        cost = float(sum(float(entry.get("estimated_cost_usd", 0.0)) for entry in self.entries))
+        actual_cost = float(
+            sum(
+                float(entry.get("cost", {}).get("actual_cost_usd", entry.get("estimated_cost_usd", 0.0)))
+                for entry in self.entries
+            )
+        )
+        equivalent_cost = float(
+            sum(
+                float(
+                    entry.get("cost", {}).get(
+                        "equivalent_cost_usd",
+                        entry.get("estimated_cost_usd", 0.0),
+                    )
+                )
+                for entry in self.entries
+            )
+        )
         blocks = 0
         tool_calls = 0
         sessions = set()
@@ -57,7 +75,9 @@ class MetricsCollector:
             "p50_latency_ms": p50,
             "p95_latency_ms": p95,
             "total_tokens": sum(tokens),
-            "estimated_cost_usd": cost,
+            "actual_cost_usd": actual_cost,
+            "equivalent_cost_usd": equivalent_cost,
+            "estimated_cost_usd": actual_cost,
             "guardrail_blocks": blocks,
             "tool_call_count": tool_calls,
             "sessions_count": len(sessions),

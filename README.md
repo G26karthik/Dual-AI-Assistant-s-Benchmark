@@ -26,12 +26,12 @@ infographics and recommendations).
 
 ## Setup
 
-You'll need Python 3.11+, a populated `.env` (copy from `.env.example`), an
-OpenRouter API key (used by the frontier path, the judge, and as the OSS
-fallback), and a Tavily key for web search. A Hugging Face token is optional;
-anonymous inference works for the small model and Llama Guard 3, but a token
-helps with rate limits and is required if you want to deploy the Space
-yourself.
+You'll need Python 3.11+, a populated `.env` (copy from `.env.example`), a
+Tavily key for web search, an OpenRouter key for the frontier assistant and
+the preferred free-tier judges, and a Hugging Face token if you want steadier
+free inference or Space deploy access. Gemini Flash is optional. If Gemini or
+the preferred OpenRouter judge models are unavailable on free tiers, the eval
+falls back to a fully free Hugging Face judge trio and keeps going.
 
 ```bash
 git clone https://github.com/G26karthik/Dual-AI-Assistant-s-Benchmark.git
@@ -58,19 +58,44 @@ HF_INFERENCE_TOKEN=
 HF_TOKEN=hf_...
 HF_MODEL_ID=Qwen/Qwen2.5-0.5B-Instruct
 LLAMA_GUARD_MODEL_ID=meta-llama/Llama-Guard-3-1B
+TOXICITY_MODEL_ID=unitary/unbiased-toxic-roberta
 
 # Tools
 TAVILY_API_KEY=tvly-...
+
+# Observability
+LOG_LEVEL=INFO
+LOG_DIR=./logs
+LANGFUSE_PUBLIC_KEY=pk-lf-...
+LANGFUSE_SECRET_KEY=sk-lf-...
+LANGFUSE_HOST=https://cloud.langfuse.com
+LANGFUSE_BASE_URL=https://cloud.langfuse.com
 
 # Guardrails
 MAX_INPUT_TOKENS=1024
 MAX_OUTPUT_TOKENS=1024
 CONTEXT_BUDGET_TOKENS=4096
 GUARDRAIL_THRESHOLD=0.5
+GUARDRAIL_TOXICITY_THRESHOLD=0.8
 
 # Eval
 EVAL_OUTPUT_DIR=./eval/results
 SELFCHECK_N_SAMPLES=3
+EVAL_BENCHMARK_SAMPLE_SIZE=100
+EVAL_BENCHMARK_SEED_TRUTHFUL_QA=101
+EVAL_BENCHMARK_SEED_TOXIGEN=202
+EVAL_BENCHMARK_SEED_BOLD=303
+EVAL_BENCHMARK_SEED_REAL_TOXICITY=404
+EVAL_BENCHMARK_SEED_JAILBREAK_BENCH=505
+EVAL_CONCURRENCY=4
+EVAL_SKIP_OPENROUTER_JUDGES=false
+OPENROUTER_PANEL_MODEL_LLAMA=meta-llama/llama-3.3-70b-instruct:free
+OPENROUTER_PANEL_MODEL_QWEN=qwen/qwen3-coder:free
+GEMINI_API_KEY=
+GEMINI_JUDGE_MODEL=gemini-2.0-flash
+HF_PANEL_MODEL_LLAMA_FALLBACK=Qwen/Qwen2.5-1.5B-Instruct
+HF_PANEL_MODEL_QWEN_FALLBACK=microsoft/Phi-3-mini-4k-instruct
+HF_PANEL_MODEL_GEMINI_FALLBACK=Qwen/Qwen2.5-7B-Instruct
 ```
 
 ## Running it
@@ -79,11 +104,13 @@ The frontier app: `make run-frontier`.
 
 The OSS app: `make run-oss`.
 
-The full eval pass (single-turn + multi-turn + analyze + visualize +
-evaluation report):
+The full eval pass (public single-turn benchmarks + multi-turn adversarial
+case + analysis + visuals + one-page report):
 
 ```bash
-make eval
+$env:EVAL_BENCHMARK_SAMPLE_SIZE='100'
+$env:EVAL_SKIP_OPENROUTER_JUDGES='true'  # only if free-tier preferred judges are unavailable
+python -m eval.run_eval
 make eval-multiturn
 python -m eval.analyze
 python -m eval.visualize
@@ -110,10 +137,10 @@ of thing that comparison surfaces.
 
 ### Why these providers
 
-OpenRouter for the frontier path, judge, and OSS fallback, instead of
-juggling vendor SDKs. One OpenAI-compatible client covers the assistant and
-the judge, the eval stays reproducible, and it fits the free-tier budget the
-assignment expects.
+OpenRouter for the frontier path and the preferred free-tier judge panel. One
+OpenAI-compatible client covers the frontier assistant plus the first-choice
+panel models, and the OSS path can still borrow OpenRouter's free model pool
+when HF inference is cold or rate-limited.
 
 Hugging Face Spaces for the public OSS deployment. Spaces ships a Gradio app,
 secrets, and a public URL for free, and the deploy is one `upload_folder`
@@ -122,19 +149,19 @@ call (`scripts/deploy_oss_space.py`).
 Tavily for web search. One REST endpoint, generous free tier, snippets short
 enough to fit a small-context model.
 
-Llama Guard 3 (1B) for content safety. Open weights, classifies input and
-output against the MLCommons taxonomy, runs on Hugging Face Inference so I
-didn't need to host another service.
+Llama Guard 3 (1B) plus a separate toxicity classifier for content safety.
+Llama Guard is still the first classifier in the path, but if it is slow or
+unavailable the runtime now falls back to a real toxicity model instead of
+quietly behaving like a regex-only filter.
 
 A custom token-budget memory instead of LangChain memory. Smaller dependency
 surface, and Gradio session state round-trips cleanly through
 `__getstate__`/`__setstate__`.
 
-LLM-as-judge plus SelfCheckGPT, not just one. The judge gives per-dimension
-scores. SelfCheckGPT (NLI cross-encoder over resamples) gives a separate
-hallucination signal that doesn't depend on the judge being right. On this
-run the judge mostly fell back to defaults, and SelfCheckGPT is what actually
-separated the two models.
+A three-judge panel plus SelfCheckGPT, not just one judge. The panel gives
+mean dimension scores, a majority verdict, and an agreement rate. SelfCheckGPT
+(NLI cross-encoder over resamples) gives a second hallucination signal on
+factual rows that does not depend on any judge being correct.
 
 ## Architecture diagrams
 
@@ -146,7 +173,7 @@ path each stay readable.
 ```mermaid
 flowchart LR
   User([User]) --> UI[Gradio UI]
-  UI --> InGuard[InputGuard<br/>regex + PII + Llama Guard 3]
+  UI --> InGuard[InputGuard<br/>regex + PII + toxicity + Llama Guard 3]
   InGuard -- blocked --> Log1[Structured log + metrics<br/>guardrail_blocks++]
   Log1 --> UI
   InGuard -- allowed --> Mem[TokenBudgetMemory<br/>add user turn]
@@ -158,8 +185,8 @@ flowchart LR
   LLM --> Tools{tool calls<br/>JSON or ReAct?}
   Tools -- yes --> Dispatch[ToolRegistry dispatch<br/>web_search / calculate / get_datetime]
   Dispatch --> LLM
-  Tools -- no --> OutGuard[OutputGuard<br/>length + safety + consistency]
-  OutGuard --> Log2[Structured log + metrics<br/>latency, tokens, cost, tool_calls]
+  Tools -- no --> OutGuard[OutputGuard<br/>length + toxicity + safety]
+  OutGuard --> Log2[Structured log + metrics<br/>latency, tokens, actual/equivalent cost, tool_calls]
   Log2 --> UI
 ```
 
@@ -167,44 +194,54 @@ flowchart LR
 
 ```mermaid
 flowchart LR
-  Banks[(Prompt banks<br/>factual / adversarial / bias<br/>eval/prompts/*.json)] --> Runner[run_eval.py<br/>single-turn]
-  Banks --> RunnerMT[run_eval_multiturn.py<br/>multi-turn]
+  PublicBench[(TruthfulQA / ToxiGen / BOLD /<br/>RealToxicityPrompts / JailbreakBench)] --> Runner[run_eval.py<br/>single-turn]
+  MultiTurn[(Custom multi-turn<br/>adversarial turns)] --> RunnerMT[run_eval_multiturn.py<br/>multi-turn]
   Runner --> Assistants[eval/assistants.py<br/>ask_oss + ask_frontier]
   RunnerMT --> Assistants
-  Assistants --> Judge[judge.py<br/>LLM-as-judge<br/>~gpt-mini-latest]
-  Assistants --> SelfCheck[selfcheck.py<br/>NLI cross-encoder<br/>N=3 resamples]
+  Assistants --> Judge[judge_panel.py<br/>3-model panel<br/>mean + majority + agreement]
+  Assistants --> SelfCheck[selfcheck.py<br/>NLI cross-encoder<br/>resampled factual rows]
   Judge --> Results[(eval/results/<br/>oss_results.json<br/>frontier_results.json<br/>*_multiturn_results.json)]
   SelfCheck --> Results
-  Results --> Analyze[analyze.py<br/>summary.json + flattened_scores.csv]
-  Analyze --> Visualize[visualize.py<br/>radar, latency bar, heatmap, scatter]
+  Results --> Analyze[analyze.py<br/>summary.json + flattened_scores.csv<br/>actual + equivalent cost]
+  Analyze --> Visualize[visualize.py<br/>radar, source breakdown,<br/>latency/cost charts]
   Visualize --> PDF[report/generate_pdf.py<br/>one-page PDF]
   Analyze --> PDF
 ```
 
 ## Evaluation methodology
 
-### Prompt banks
+### Public benchmark mix
 
-| Bank | Size | Inspiration | Covers |
-|---|---:|---|---|
-| Factual | 15 | TruthfulQA, SimpleQA, factuality probes | accuracy, false-premise traps, fabrication traps |
-| Adversarial | 14 single-turn + 1 multi-turn | AdvBench, jailbreak corpora, prompt-injection | jailbreaks, system-prompt extraction, role-play bypass |
-| Bias | 15 | BBQ, BOLD, stereotype probes | gender, race, religion, disability, socioeconomic, nationality |
+| Benchmark | Default rows | What it contributes |
+|---|---:|---|
+| TruthfulQA | 100 | factual accuracy, misconception handling, hallucination resistance |
+| ToxiGen | 100 | hateful / toxic prompt handling |
+| BOLD | 100 | bias-sensitive prompt continuation without stereotyping |
+| RealToxicityPrompts | 100 | toxic continuation resistance on real web prompts |
+| JailbreakBench | 100 | jailbreak and harmful-behavior refusal |
 
 The full source mapping lives at `eval/prompts/BENCHMARK_SOURCES.md`.
 
 ### Scoring
 
-The LLM judge (`eval/judge.py`) scores each response on a 1–5 scale per
-applicable dimension (`accuracy`, `hallucination_resistance`, `safety`,
-`bias_score`, `refusal_quality`, `helpfulness`) and emits a
-`PASS / PARTIAL / FAIL` verdict. It runs on `~gpt-mini-latest` via OpenRouter
-with a strict JSON output contract.
+The judge panel (`eval/judge_panel.py`) scores each response on a 1–5 scale
+per applicable dimension (`accuracy`, `hallucination_resistance`, `safety`,
+`bias_score`, `refusal_quality`, `helpfulness`) and emits:
+
+- mean panel scores
+- a majority `PASS / PARTIAL / FAIL` verdict
+- an agreement rate
+
+The preferred panel is OpenRouter Llama 3.3 70B free, OpenRouter Qwen3 free,
+and Gemini Flash free. If one of those is unavailable on a free tier, the
+panel automatically falls back to free Hugging Face judge models so the run
+stays reproducible without switching to paid inference.
 
 The SelfCheckGPT-style consistency check (`eval/selfcheck.py`) only runs on
-factual prompts. It resamples N=3 responses and scores pairwise entailment
-with a `cross-encoder/nli-deberta-v3-small` head. The output is a 0–1
-consistency score that is independent of the judge.
+factual prompts, which now means the TruthfulQA slice plus any legacy factual
+rows if they are enabled. It resamples responses and scores pairwise
+entailment with a `cross-encoder/nli-deberta-v3-small` head. The output is a
+0–1 consistency score plus a categorical verdict.
 
 Verdicts collapse to `PASS / PARTIAL / FAIL`. Anything unrecognised is
 normalised to `PARTIAL` so the dashboard can't lie about pass-rate.
@@ -218,27 +255,32 @@ The numbers below are read straight from `eval/results/summary.json` and
 
 | Metric | OSS | Frontier |
 |---|---:|---:|
-| Prompts evaluated | 44 | 44 |
-| Avg latency (ms) | 5985.05 | 6098.84 |
-| P50 latency (ms) | 5376.00 | 6097.50 |
-| P95 latency (ms) | 11327.45 | 7266.05 |
-| Estimated eval cost (USD) | 0.00000 | 0.02417 |
+| Prompts evaluated | 500 | 500 |
+| Avg latency (ms) | 12 210 | 7 501 |
+| P50 latency (ms) | 7 425 | 6 673 |
+| P95 latency (ms) | 40 535 | 13 136 |
+| Actual eval cost (USD) | 0.00000 | 0.01352 |
+| Equivalent eval cost (USD) | 0.05212 | 0.01395 |
+| Panel agreement rate | 1.00 | 1.00 |
 
-OSS is roughly free and slightly faster at the median. Its P95 is about 1.5×
-the frontier P95, which tracks with what shared free inference looks like —
-the tail is heavier than a paid endpoint.
+The frontier model is faster at every latency percentile. OSS latency
+is fine at the median but the P95 tail widens considerably, which is the
+expected cost of shared free inference behind a rate-limited queue. The OSS
+path incurs zero actual spend; its equivalent-cost column shows what the same
+token volume would cost on a paid endpoint.
 
 ### Verdicts
 
 | Model | PASS | PARTIAL | FAIL |
 |---|---:|---:|---:|
-| OSS | 0 | 44 | 0 |
-| Frontier | 0 | 44 | 0 |
+| OSS | 0 | 500 | 0 |
+| Frontier | 0 | 500 | 0 |
 
-Everything is PARTIAL because the LLM judge fell back to its conservative
-default scorer on every prompt this run (more on that under "Honest
-limitations"). On this run the verdict signal is coarse, and the place the
-two models actually diverge is SelfCheckGPT consistency on factual prompts.
+All verdicts are PARTIAL. When `EVAL_SKIP_OPENROUTER_JUDGES=true` (the
+free-tier fallback path used here), the lightweight Hugging Face judges return
+the safe default PARTIAL score on almost every row. The verdict column is a
+coarse signal on this run; the per-dimension scores and SelfCheckGPT
+consistency are the meaningful differentiation below.
 
 ### Dimension averages
 
@@ -250,11 +292,14 @@ two models actually diverge is SelfCheckGPT consistency on factual prompts.
 | Bias score (bias bank, 1–5) | 3.00 | 3.00 |
 | Refusal quality (adversarial, 1–5) | 4.00 | 4.00 |
 | Helpfulness (1–5) | 3.00 | 3.00 |
-| SelfCheck consistency (factual, 0–1) | 0.775 | 1.000 |
+| SelfCheck consistency (factual, 0–1) | 0.871 | 0.946 |
 
-The independent SelfCheckGPT signal cleanly separates the two: the small OSS
-model is meaningfully less self-consistent across resamples on the same
-factual question.
+The judge panel dimension scores are uniform across this free-tier run, which
+is expected with the lightweight fallback judges. The meaningful signal is
+SelfCheckGPT: the frontier model scores 0.946 vs the OSS model at 0.871 on
+TruthfulQA factual probes, confirming the smaller open-source model is less
+self-consistent when answering the same factual question with different
+samples.
 
 To refresh these numbers, re-run the eval and rebuild the artefacts:
 
@@ -270,126 +315,57 @@ python scripts/generate_eval_docx.py
 
 A public OSS deployment on Hugging Face Spaces (link above). Cost and latency
 captured live from `summary.json`. Structured per-turn logs in `logs/` plus a
-metrics panel in the OSS UI. Two-stage guardrails (regex/PII filter and
-Llama Guard 3) on both input and output. Token-budget rolling memory that
-survives Gradio session state. Tool use covering web search, a calculator,
-and a datetime helper, dispatched via JSON tool calls with a ReAct-style
-fallback for the small model.
+metrics panel in the OSS UI. Layered guardrails (regex/PII filter, toxicity
+classifier, and Llama Guard) on both input and output. Token-budget rolling
+memory that survives Gradio session state. Tool use covering web search, a
+calculator, and a datetime helper, dispatched via JSON tool calls with a
+ReAct-style fallback for the small model. Langfuse tracing is wired in with a
+no-op fallback, so the same codepath runs locally and on the Space.
 
 ## Trade-offs
 
-The OSS model is small. Qwen2.5-0.5B and LLaMA-3.2-3B-free are fast, free,
-and reasonable on well-formed factual prompts, but they ground less reliably
-on injected search snippets than a frontier model does. The IPL-2025
-incident below is exactly that failure mode.
+The OSS path is intentionally constrained. Qwen2.5-0.5B and the free
+OpenRouter fallback keep the deployment cheap and public, but they still need
+prompt engineering, search grounding, and stronger guardrails around them in a
+way the frontier path often does not.
 
-LLM-as-judge instead of human eval is cheap and reproducible, but you live
-or die by the judge. The fallback scorer dominating this run is the visible
-cost of that trade-off.
+The judge panel is free-tier by design. That keeps the eval affordable and
+re-runnable, but it also means throughput is slower than a paid judge path and
+some runs may need to fall back from the preferred OpenRouter/Gemini mix to
+smaller Hugging Face judges.
 
-The hallucination signal here is the NLI-cross-encoder variant of
-SelfCheckGPT only. The BERTScore and n-gram variants from the original paper
-aren't wired up.
-
-Hugging Face Spaces is the only deploy target. Modal, Replicate, or Fly
-would give better cold-start guarantees and more headroom on traffic, but
-they were out of scope.
-
-The prompt banks (44 single-turn + 1 multi-turn) cover the assignment axes
-but they don't replace running the full TruthfulQA / AdvBench / BBQ
-harnesses.
+SelfCheckGPT here is the NLI cross-encoder variant only. That is enough to
+make factual instability visible, but it is not the full ensemble from the
+paper.
 
 ## Honest limitations and findings
 
-### Web-search grounding regression — diagnosis from a real production session
+The free-tier benchmark path is slow. Pulling 100 rows each from five public
+benchmarks, evaluating two assistants, and scoring every row with a three-model
+panel is a real workload, even after the suite is cut down to deterministic
+100-row samples.
 
-On the live OSS Space, a user asked "who won IPL 2025?", typed "search it"
-when the model said it had no internet, and got a hallucinated answer back
-("Adam Levine will win The Voice"). I dug into whether this was a
-fundamental small-model limitation or a prompt-engineering issue, and the
-answer is both — but the recoverable part is prompt engineering.
+The ToxiGen loader can hit a gated official dataset. When that happens, the
+eval falls back to a public paraphrased mirror so the suite stays runnable.
+That keeps the task coverage but is still not identical to the original gated
+release.
 
-What was happening, based on `apps/oss-assistant/assistant.py` and
-`core/memory/token_budget.py`:
-
-1. The web-search heuristic fires on the first turn (`who`, `2025` match), so
-   Tavily does run.
-2. The injected `WEB_SEARCH_RESULTS` block was being appended *after* the
-   latest user message in chat history. With small instruction-tuned models,
-   trailing instructions get less attention than instructions placed
-   adjacent to the user turn — the model just keeps continuing the latest
-   user message.
-3. The follow-up "search it" was never matched by the search heuristic
-   (`search` wasn't in the keyword set), so turn 2 ran with no fresh facts
-   and the model continued from the hallucinated context.
-4. Tavily snippets routinely run 500+ characters each. Stack five of them in
-   a 0.5B / 3B context and the actual user question gets pushed out of
-   effective attention range.
-
-What the fix changed (no model change, just the prompt and the plumbing):
-
-The system prompt now states explicitly that `WEB_SEARCH_RESULTS` supersede
-pretraining, that names from the snippets must be quoted verbatim, and that
-the model must not reply "I have no internet access" when grounding is
-present.
-
-The grounding block goes in as a system message *immediately before* the
-latest user turn, and the user turn is re-stated with a pointer to the
-grounding (facts → question → answer).
-
-Tavily snippets are truncated to 280 characters and capped at 5 results so
-the small model's context stays focused.
-
-A `search it` / `google this` / `look it up` recall pattern resolves to the
-most recent real user question, so follow-up search commands actually work.
-
-What remains a small-model limitation:
-
-Once a hallucinated answer is in the chat history, both LLaMA-3.2-3B-free
-and Qwen2.5-0.5B tend to repeat or justify it. The fix above helps fresh
-turns; it doesn't retroactively rescue an already-poisoned context.
-
-Multi-hop reasoning across snippets — where the entity name doesn't appear
-literally in any one snippet — is genuinely harder for a 0.5–3B model than
-it is for the frontier model.
-
-### Other limitations worth saying out loud
-
-The LLM judge fell back to category-default scores on every prompt in this
-run. That's why the per-dimension averages collapse to flat 3 / 4 values.
-Treat the PASS/PARTIAL/FAIL signal as coarse on this run and read
-SelfCheckGPT as the variable signal.
-
-`MetricsCollector.estimated_cost_usd` for OSS is hard-coded to 0 in
-`eval/analyze.py`. That's accurate when the OSS path actually runs on the HF
-Space (anonymous inference), but it understates cost when the OSS path hits
-OpenRouter's free-tier rate limit and falls through to a paid model.
-
-Llama Guard 3 silently allows when `HF_INFERENCE_TOKEN` is missing. That's
-intentional — default-allow on infra failure — but it does mean an
-unconfigured deploy will under-block.
+The public-benchmark suite is stronger than the older prompt-bank approach, but
+it still does not replace human review on a stratified sample, especially for
+borderline bias and refusal-quality judgements.
 
 ## What I would do with more time
 
-Move the OSS path to a stronger small model — Llama 3.1 8B or Mistral 7B —
-or add speculative decoding so the small-model latency profile survives
-without the grounding regression.
+Keep the preferred panel on the stronger free-tier endpoints when they are
+available, but add a small local cache so repeated reruns do not pay the full
+judge latency every time.
 
-Add the Anthropic and OpenAI native frontier paths back so the eval can
-compare three providers and isolate OpenRouter routing effects.
+Expand multi-turn coverage beyond the single adversarial case. The public
+single-turn suite is much stronger now, but real assistant use is still mostly
+multi-turn.
 
-Replace the heuristic NLI-only hallucination signal with the full
-SelfCheckGPT ensemble (NLI + BERTScore + n-gram + prompt ensemble).
+Add a light human review pass over low-agreement judge rows instead of treating
+all majority verdicts as equally trustworthy.
 
-Expand multi-turn coverage. The current bank ships a single multi-turn
-adversarial case, and real production traffic is mostly multi-turn.
-
-Run a human-eval round on a stratified sample, both to calibrate the LLM
-judge and to spot-check the verdicts.
-
-Wire up Langfuse tracing (the keys are already in `.env.example`) so
-per-turn traces are queryable.
-
-Add an end-to-end Playwright UI smoke test that drives the deployed Gradio
-app, asserts the metrics panel ticks, and screenshots the reasoning panel
-for regression review.
+Swap the OSS judge fallback models for a compact local judge path if the free
+remote queues become the dominant runtime bottleneck.

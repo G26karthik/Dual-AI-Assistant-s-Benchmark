@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import time
 import uuid
 from datetime import UTC, datetime
@@ -13,6 +14,8 @@ from dotenv import load_dotenv
 from core.guardrails.input_guard import InputGuard
 from core.guardrails.output_guard import OutputGuard
 from core.memory.token_budget import TokenBudgetMemory
+from core.observability.cost import usage_to_cost
+from core.observability.langfuse_tracer import get_tracer
 from core.observability.logger import StructuredLogger
 from core.observability.metrics import MetricsCollector
 
@@ -28,7 +31,8 @@ def _format_metrics(metrics: MetricsCollector) -> str:
         f"- **P50 / P95 latency:** {float(summary.get('p50_latency_ms', 0.0)):.2f} / "
         f"{float(summary.get('p95_latency_ms', 0.0)):.2f} ms\n"
         f"- **Total tokens:** {int(summary.get('total_tokens', 0))}\n"
-        f"- **Estimated cost:** ${float(summary.get('estimated_cost_usd', 0.0)):.6f}\n"
+        f"- **Actual cost:** ${float(summary.get('actual_cost_usd', 0.0)):.6f}\n"
+        f"- **Equivalent cost:** ${float(summary.get('equivalent_cost_usd', 0.0)):.6f}\n"
         f"- **Guardrail blocks:** {int(summary.get('guardrail_blocks', 0))}\n"
         f"- **Tool calls:** {int(summary.get('tool_call_count', 0))}\n"
         f"- **Sessions tracked:** {int(summary.get('sessions_count', 0))}"
@@ -162,6 +166,15 @@ def _approx_tokens(text: str) -> int:
     return max(1, len(text) // 4)
 
 
+def _runtime_model_info() -> tuple[str, str]:
+    if os.getenv("OPENROUTER_API_KEY", "").strip():
+        return "openrouter", os.getenv(
+            "OSS_OPENROUTER_MODEL",
+            "meta-llama/llama-3.2-3b-instruct:free",
+        )
+    return "huggingface", os.getenv("HF_MODEL_ID", "Qwen/Qwen2.5-0.5B-Instruct")
+
+
 def _build_log_entry(
     *,
     session_id: str,
@@ -174,10 +187,19 @@ def _build_log_entry(
     latency_ms: int,
     memory: TokenBudgetMemory,
 ) -> dict[str, Any]:
+    provider, model_name = _runtime_model_info()
+    cost = usage_to_cost(
+        model_name=model_name,
+        provider=provider,
+        usage=None,
+        prompt_fallback=user_message,
+        completion_fallback=assistant_text,
+    )
     return {
         "session_id": session_id,
         "turn_id": turn_id,
-        "model": "qwen2.5-0.5b-instruct",
+        "model": model_name,
+        "provider": provider,
         "user_input": user_message,
         "assistant_output": assistant_text,
         "input_guard": input_guard_result,
@@ -192,7 +214,8 @@ def _build_log_entry(
         },
         "memory_tokens_in_context": memory.token_count(),
         "memory_tokens_remaining": memory.tokens_remaining(),
-        "estimated_cost_usd": 0.0,
+        "cost": cost.to_dict(),
+        "estimated_cost_usd": cost.actual_cost_usd,
     }
 
 
@@ -205,6 +228,7 @@ async def respond(
     metrics,
     guardrail_events,
 ):
+    tracer = get_tracer()
     normalized_history = _normalize_chat_history(history)
     user_message = _extract_text_from_content(message)
     session_id = str(uuid.uuid4())
@@ -213,89 +237,95 @@ async def respond(
     output_guard = OutputGuard()
     start = time.perf_counter()
 
-    in_result = await input_guard.check(user_message)
-    if not in_result.allowed:
+    with tracer.span(
+        "app.oss.respond",
+        input={"session_id": session_id, "user_message": user_message[:240]},
+    ) as span:
+        in_result = await input_guard.check(user_message)
+        if not in_result.allowed:
+            guardrail_events = _append_guardrail_event(
+                guardrail_events,
+                phase="input",
+                reason=in_result.reason,
+                allowed=False,
+            )
+            bot_reply = f"Request blocked by input guardrail: {in_result.reason or 'Unknown reason'}"
+            updated_history = _append_chat_turn(normalized_history, user_message, bot_reply)
+
+            latency_ms = int((time.perf_counter() - start) * 1000)
+            blocked_entry = _build_log_entry(
+                session_id=session_id,
+                turn_id=turn_id,
+                user_message=user_message,
+                assistant_text=bot_reply,
+                input_guard_result=in_result.__dict__,
+                output_guard_result={"allowed": True, "reason": "skipped: input blocked"},
+                tool_trace=[],
+                latency_ms=latency_ms,
+                memory=memory,
+            )
+            metrics.record_turn(blocked_entry)
+            await LOGGER.log_turn(blocked_entry)
+            span.update(output={"blocked": True, "reason": in_result.reason})
+
+            return (
+                updated_history,
+                "",
+                _format_metrics(metrics),
+                _render_guardrail_markdown(guardrail_events),
+                _render_reasoning(show_reasoning, []),
+                memory,
+                metrics,
+                guardrail_events,
+            )
+
+        memory.add_turn("user", user_message)
+        response, tool_trace = await generate_oss_response(
+            memory, user_message, enable_web_search=enable_web_search
+        )
+        out_result = await output_guard.check(
+            user_message,
+            response,
+            input_blocked=False,
+            used_web_search=any(t.get("tool") == "web_search" for t in tool_trace),
+            selfcheck_ran=False,
+        )
+        final_text = response if out_result.allowed else f"Response blocked: {out_result.reason or 'Unsafe output'}"
+        memory.add_turn("assistant", final_text)
         guardrail_events = _append_guardrail_event(
             guardrail_events,
-            phase="input",
-            reason=in_result.reason,
-            allowed=False,
+            phase="output",
+            reason=out_result.reason,
+            allowed=out_result.allowed,
         )
-        bot_reply = f"Request blocked by input guardrail: {in_result.reason or 'Unknown reason'}"
-        updated_history = _append_chat_turn(normalized_history, user_message, bot_reply)
 
         latency_ms = int((time.perf_counter() - start) * 1000)
-        blocked_entry = _build_log_entry(
+        entry = _build_log_entry(
             session_id=session_id,
             turn_id=turn_id,
             user_message=user_message,
-            assistant_text=bot_reply,
+            assistant_text=final_text,
             input_guard_result=in_result.__dict__,
-            output_guard_result={"allowed": True, "reason": "skipped: input blocked"},
-            tool_trace=[],
+            output_guard_result=out_result.__dict__,
+            tool_trace=tool_trace,
             latency_ms=latency_ms,
             memory=memory,
         )
-        metrics.record_turn(blocked_entry)
-        await LOGGER.log_turn(blocked_entry)
+        metrics.record_turn(entry)
+        await LOGGER.log_turn(entry)
+        span.update(output={"tool_count": len(tool_trace), "latency_ms": latency_ms})
 
+        updated_history = _append_chat_turn(normalized_history, user_message, final_text)
         return (
             updated_history,
             "",
             _format_metrics(metrics),
             _render_guardrail_markdown(guardrail_events),
-            _render_reasoning(show_reasoning, []),
+            _render_reasoning(show_reasoning, tool_trace),
             memory,
             metrics,
             guardrail_events,
         )
-
-    memory.add_turn("user", user_message)
-    response, tool_trace = await generate_oss_response(
-        memory, user_message, enable_web_search=enable_web_search
-    )
-    out_result = await output_guard.check(
-        user_message,
-        response,
-        input_blocked=False,
-        used_web_search=any(t.get("tool") == "web_search" for t in tool_trace),
-        selfcheck_ran=False,
-    )
-    final_text = response if out_result.allowed else f"Response blocked: {out_result.reason or 'Unsafe output'}"
-    memory.add_turn("assistant", final_text)
-    guardrail_events = _append_guardrail_event(
-        guardrail_events,
-        phase="output",
-        reason=out_result.reason,
-        allowed=out_result.allowed,
-    )
-
-    latency_ms = int((time.perf_counter() - start) * 1000)
-    entry = _build_log_entry(
-        session_id=session_id,
-        turn_id=turn_id,
-        user_message=user_message,
-        assistant_text=final_text,
-        input_guard_result=in_result.__dict__,
-        output_guard_result=out_result.__dict__,
-        tool_trace=tool_trace,
-        latency_ms=latency_ms,
-        memory=memory,
-    )
-    metrics.record_turn(entry)
-    await LOGGER.log_turn(entry)
-
-    updated_history = _append_chat_turn(normalized_history, user_message, final_text)
-    return (
-        updated_history,
-        "",
-        _format_metrics(metrics),
-        _render_guardrail_markdown(guardrail_events),
-        _render_reasoning(show_reasoning, tool_trace),
-        memory,
-        metrics,
-        guardrail_events,
-    )
 
 
 async def respond_api(

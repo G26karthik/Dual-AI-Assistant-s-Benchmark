@@ -29,16 +29,30 @@ def _flatten_scores(results: list[dict[str, Any]], model_name: str) -> pd.DataFr
             else 0
         )
         token_count = int(tokens)
-        estimated_cost = 0.0 if model_name == "oss" else (token_count / 1000.0) * 0.01
+        assistant_cost = item.get("assistant_cost", {}) if isinstance(item.get("assistant_cost"), dict) else {}
+        judge_cost = judge.get("cost", {}) if isinstance(judge, dict) else {}
+        assistant_actual_cost = float(assistant_cost.get("actual_cost_usd", 0.0))
+        assistant_equivalent_cost = float(assistant_cost.get("equivalent_cost_usd", 0.0))
+        judge_actual_cost = float(judge_cost.get("actual_cost_usd", 0.0))
+        judge_equivalent_cost = float(judge_cost.get("equivalent_cost_usd", 0.0))
         rows.append(
             {
                 "model": model_name,
                 "id": item.get("id"),
+                "benchmark_name": item.get("benchmark_name"),
+                "source_dataset": item.get("source_dataset"),
                 "category": item.get("category"),
                 "verdict": verdict,
+                "majority_verdict": judge.get("majority_verdict", verdict) if isinstance(judge, dict) else verdict,
+                "agreement_rate": judge.get("agreement_rate") if isinstance(judge, dict) else None,
                 "latency_ms": item.get("latency_ms", 0),
                 "tokens": token_count,
-                "estimated_cost_usd": estimated_cost,
+                "assistant_actual_cost_usd": assistant_actual_cost,
+                "assistant_equivalent_cost_usd": assistant_equivalent_cost,
+                "judge_actual_cost_usd": judge_actual_cost,
+                "judge_equivalent_cost_usd": judge_equivalent_cost,
+                "actual_cost_usd": assistant_actual_cost + judge_actual_cost,
+                "equivalent_cost_usd": assistant_equivalent_cost + judge_equivalent_cost,
                 "accuracy": scores.get("accuracy") if isinstance(scores, dict) else None,
                 "hallucination_resistance": scores.get("hallucination_resistance")
                 if isinstance(scores, dict)
@@ -50,6 +64,9 @@ def _flatten_scores(results: list[dict[str, Any]], model_name: str) -> pd.DataFr
                 "selfcheck_consistency": item.get("selfcheck", {}).get("consistency_score")
                 if isinstance(item.get("selfcheck"), dict)
                 else None,
+                "selfcheck_verdict": item.get("selfcheck", {}).get("verdict")
+                if isinstance(item.get("selfcheck"), dict)
+                else item.get("selfcheck_verdict"),
             }
         )
     return pd.DataFrame(rows)
@@ -73,11 +90,17 @@ def main() -> None:
     summary = {
         "rows": int(len(df)),
         "by_model": df.groupby("model").size().to_dict(),
+        "by_benchmark": {
+            f"{model}:{benchmark}": int(count)
+            for (model, benchmark), count in df.groupby(["model", "benchmark_name"]).size().to_dict().items()
+        },
         "avg_latency_ms": df.groupby("model")["latency_ms"].mean().fillna(0).to_dict(),
         "p50_latency_ms": df.groupby("model")["latency_ms"].median().fillna(0).to_dict(),
         "p95_latency_ms": df.groupby("model")["latency_ms"].quantile(0.95).fillna(0).to_dict(),
         "avg_tokens": df.groupby("model")["tokens"].mean().fillna(0).to_dict(),
-        "estimated_total_cost_usd": df.groupby("model")["estimated_cost_usd"].sum().fillna(0).to_dict(),
+        "actual_total_cost_usd": df.groupby("model")["actual_cost_usd"].sum().fillna(0).to_dict(),
+        "equivalent_total_cost_usd": df.groupby("model")["equivalent_cost_usd"].sum().fillna(0).to_dict(),
+        "avg_agreement_rate": df.groupby("model")["agreement_rate"].mean().fillna(0).to_dict(),
         "verdict_counts": verdict_counts,
     }
     (output_dir / "summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")

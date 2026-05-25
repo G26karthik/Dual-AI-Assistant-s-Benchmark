@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import os
 import time
 import uuid
 from collections.abc import AsyncGenerator
@@ -14,6 +15,8 @@ from dotenv import load_dotenv
 from core.guardrails.input_guard import InputGuard
 from core.guardrails.output_guard import OutputGuard
 from core.memory.token_budget import TokenBudgetMemory
+from core.observability.cost import usage_to_cost
+from core.observability.langfuse_tracer import get_tracer
 from core.observability.logger import StructuredLogger
 from core.observability.metrics import MetricsCollector
 
@@ -37,55 +40,71 @@ async def respond(
     output_guard = OutputGuard()
 
     start = time.perf_counter()
-    in_result = await input_guard.check(message)
-    if not in_result.allowed:
-        yield f"Request blocked by input guardrail: {in_result.reason or 'Unknown reason'}"
-        return
+    tracer = get_tracer()
+    with tracer.span(
+        "app.frontier.respond",
+        input={"session_id": session_id, "user_message": message[:240]},
+    ) as span:
+        in_result = await input_guard.check(message)
+        if not in_result.allowed:
+            yield f"Request blocked by input guardrail: {in_result.reason or 'Unknown reason'}"
+            span.update(output={"blocked": True, "reason": in_result.reason})
+            return
 
-    memory.add_turn("user", message)
-    response, tool_trace = await generate_frontier_response(
-        memory, message, enable_web_search=enable_web_search
-    )
-    out_result = await output_guard.check(
-        message,
-        response,
-        input_blocked=False,
-        used_web_search=any(t["tool"] == "web_search" for t in tool_trace),
-        selfcheck_ran=False,
-    )
-    final_text = response if out_result.allowed else f"Response blocked: {out_result.reason or 'Unsafe output'}"
-    memory.add_turn("assistant", final_text)
+        memory.add_turn("user", message)
+        response, tool_trace = await generate_frontier_response(
+            memory, message, enable_web_search=enable_web_search
+        )
+        out_result = await output_guard.check(
+            message,
+            response,
+            input_blocked=False,
+            used_web_search=any(t["tool"] == "web_search" for t in tool_trace),
+            selfcheck_ran=False,
+        )
+        final_text = response if out_result.allowed else f"Response blocked: {out_result.reason or 'Unsafe output'}"
+        memory.add_turn("assistant", final_text)
 
-    words = final_text.split(" ")
-    running = ""
-    for word in words:
-        running = f"{running} {word}".strip()
-        yield running
-        await asyncio.sleep(0.01)
+        words = final_text.split(" ")
+        running = ""
+        for word in words:
+            running = f"{running} {word}".strip()
+            yield running
+            await asyncio.sleep(0.01)
 
-    latency_ms = int((time.perf_counter() - start) * 1000)
-    entry = {
-        "session_id": session_id,
-        "turn_id": turn_id,
-        "model": "frontier",
-        "user_input": message,
-        "assistant_output": final_text,
-        "input_guard": in_result.__dict__,
-        "output_guard": out_result.__dict__,
-        "tools_used": [t["tool"] for t in tool_trace],
-        "tool_calls": tool_trace if show_reasoning else [],
-        "latency_ms": {"total": latency_ms},
-        "tokens": {
-            "prompt_tokens": max(1, len(message) // 4),
-            "completion_tokens": max(1, len(final_text) // 4),
-            "total_tokens": max(1, (len(message) + len(final_text)) // 4),
-        },
-        "memory_tokens_in_context": memory.token_count(),
-        "memory_tokens_remaining": memory.tokens_remaining(),
-        "estimated_cost_usd": 0.003 * max(1, (len(message) + len(final_text)) // 500),
-    }
-    metrics.record_turn(entry)
-    await LOGGER.log_turn(entry)
+        latency_ms = int((time.perf_counter() - start) * 1000)
+        cost = usage_to_cost(
+            model_name=os.getenv("OPENROUTER_MODEL", "~openai/gpt-mini-latest"),
+            provider="openrouter",
+            usage=None,
+            prompt_fallback=message,
+            completion_fallback=final_text,
+        )
+        entry = {
+            "session_id": session_id,
+            "turn_id": turn_id,
+            "model": os.getenv("OPENROUTER_MODEL", "~openai/gpt-mini-latest"),
+            "provider": "openrouter",
+            "user_input": message,
+            "assistant_output": final_text,
+            "input_guard": in_result.__dict__,
+            "output_guard": out_result.__dict__,
+            "tools_used": [t["tool"] for t in tool_trace],
+            "tool_calls": tool_trace if show_reasoning else [],
+            "latency_ms": {"total": latency_ms},
+            "tokens": {
+                "prompt_tokens": max(1, len(message) // 4),
+                "completion_tokens": max(1, len(final_text) // 4),
+                "total_tokens": max(1, (len(message) + len(final_text)) // 4),
+            },
+            "memory_tokens_in_context": memory.token_count(),
+            "memory_tokens_remaining": memory.tokens_remaining(),
+            "cost": cost.to_dict(),
+            "estimated_cost_usd": cost.actual_cost_usd,
+        }
+        metrics.record_turn(entry)
+        await LOGGER.log_turn(entry)
+        span.update(output={"tool_count": len(tool_trace), "latency_ms": latency_ms})
 
 
 def build_app() -> gr.Blocks:

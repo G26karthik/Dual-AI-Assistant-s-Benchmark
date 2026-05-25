@@ -44,6 +44,26 @@ def _stage(repo_root: Path, staging: Path) -> None:
         shutil.copy2(env_example, staging / ".env.example")
 
 
+def _sync_space_secrets(api: HfApi, repo_id: str) -> None:
+    secrets = {
+        "LANGFUSE_PUBLIC_KEY": os.getenv("LANGFUSE_PUBLIC_KEY", "").strip(),
+        "LANGFUSE_SECRET_KEY": os.getenv("LANGFUSE_SECRET_KEY", "").strip(),
+        "LANGFUSE_HOST": os.getenv("LANGFUSE_HOST", "").strip(),
+        "LANGFUSE_BASE_URL": os.getenv("LANGFUSE_BASE_URL", "").strip(),
+        "HF_INFERENCE_TOKEN": (
+            os.getenv("HF_INFERENCE_TOKEN", "").strip()
+            or os.getenv("HF_TOKEN", "").strip()
+        ),
+    }
+    for key, value in secrets.items():
+        if not value:
+            continue
+        add_secret = getattr(api, "add_space_secret", None)
+        if add_secret is None:
+            continue
+        add_secret(repo_id=repo_id, key=key, value=value)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument(
@@ -58,7 +78,7 @@ def main() -> int:
     )
     parser.add_argument(
         "--commit-message",
-        default="Fix chat-history escaping, force web_search, count blocked turns, render reasoning",
+        default="Upgrade OSS assistant guardrails, tracing, and evaluation support",
     )
     args = parser.parse_args()
 
@@ -75,6 +95,7 @@ def main() -> int:
     print(f"Staged files to {staging}")
 
     api = HfApi(token=token)
+    _sync_space_secrets(api, args.space)
     info = api.upload_folder(
         folder_path=str(staging),
         repo_id=args.space,

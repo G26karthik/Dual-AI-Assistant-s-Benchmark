@@ -18,6 +18,7 @@ except Exception:  # pragma: no cover - optional in some runtimes
     torch = None  # type: ignore[assignment]
 
 from core.memory.token_budget import TokenBudgetMemory
+from core.observability.langfuse_tracer import get_tracer
 from core.tools.calculator import calculate
 from core.tools.datetime_tool import get_datetime
 from core.tools.registry import ToolRegistry
@@ -300,12 +301,21 @@ async def _openrouter_oss_chat(messages: list[dict[str, str]]) -> str:
             "X-OpenRouter-Title": os.getenv("OPENROUTER_TITLE", "Dual AI Assistant Benchmark"),
         },
     )
-    response = await client.chat.completions.create(
-        model=os.getenv("OSS_OPENROUTER_MODEL", "meta-llama/llama-3.2-3b-instruct:free"),
-        messages=messages,  # type: ignore[arg-type]
-        max_tokens=int(os.getenv("MAX_OUTPUT_TOKENS", "256")),
-    )
-    return (response.choices[0].message.content or "").strip() or "I could not generate a response."
+    model_name = os.getenv("OSS_OPENROUTER_MODEL", "meta-llama/llama-3.2-3b-instruct:free")
+    tracer = get_tracer()
+    with tracer.generation(
+        "assistant.oss.openrouter",
+        model=model_name,
+        input={"messages": messages[-3:]},
+    ) as span:
+        response = await client.chat.completions.create(
+            model=model_name,
+            messages=messages,  # type: ignore[arg-type]
+            max_tokens=int(os.getenv("MAX_OUTPUT_TOKENS", "256")),
+        )
+        text = (response.choices[0].message.content or "").strip() or "I could not generate a response."
+        span.update(output={"response_preview": text[:300]})
+        return text
 
 
 def build_registry(enable_web_search: bool) -> ToolRegistry:
@@ -482,10 +492,22 @@ async def _hf_chat(messages: list[dict[str, str]], tools: list[dict]) -> Any:
         model=os.getenv("HF_MODEL_ID", "Qwen/Qwen2.5-0.5B-Instruct"),
         token=inference_token,
     )
-    try:
-        return await client.chat_completion(messages=messages, tools=tools if tools else None, max_tokens=512)
-    finally:
-        await client.close()
+    tracer = get_tracer()
+    with tracer.generation(
+        "assistant.oss.huggingface",
+        model=os.getenv("HF_MODEL_ID", "Qwen/Qwen2.5-0.5B-Instruct"),
+        input={"messages": messages[-3:], "tool_count": len(tools)},
+    ) as span:
+        try:
+            response = await client.chat_completion(
+                messages=messages,
+                tools=tools if tools else None,
+                max_tokens=512,
+            )
+            span.update(output={"received": True})
+            return response
+        finally:
+            await client.close()
 
 
 def _normalize_hf_response(resp: Any) -> tuple[str, list[dict[str, Any]]]:
@@ -551,60 +573,72 @@ async def generate_oss_response(
     enable_web_search: bool = True,
     max_rounds: int = 3,
 ) -> tuple[str, list[dict[str, Any]]]:
-    registry = build_registry(enable_web_search=enable_web_search)
-    messages = memory.get_messages()
-    if not messages or messages[0]["role"] != "system":
-        messages = [{"role": "system", "content": OSS_SYSTEM_PROMPT}, *messages]
+    tracer = get_tracer()
+    with tracer.span(
+        "assistant.oss.generate",
+        input={"enable_web_search": enable_web_search, "user_message": user_message[:240]},
+    ) as span:
+        registry = build_registry(enable_web_search=enable_web_search)
+        messages = memory.get_messages()
+        if not messages or messages[0]["role"] != "system":
+            messages = [{"role": "system", "content": OSS_SYSTEM_PROMPT}, *messages]
 
-    tool_trace: list[dict[str, Any]] = []
-    grounding: str | None = None
-    search_query = _resolve_search_query(user_message, messages)
-    should_search = enable_web_search and (
-        _should_use_web_search(user_message)
-        or (_is_search_recall_command(user_message) and search_query != user_message)
-    )
-    if should_search:
-        grounding = await _run_explicit_web_search(
-            user_message, tool_trace, messages, search_query=search_query
+        tool_trace: list[dict[str, Any]] = []
+        grounding: str | None = None
+        search_query = _resolve_search_query(user_message, messages)
+        should_search = enable_web_search and (
+            _should_use_web_search(user_message)
+            or (_is_search_recall_command(user_message) and search_query != user_message)
         )
-
-    for _ in range(max_rounds):
-        try:
-            resp = await _hf_chat(messages, registry.get_openai_schemas())
-        except Exception:
-            fallback_text, fallback_trace = await _fallback_oss_response(
-                user_message,
-                registry,
-                grounding=grounding,
-                search_query=search_query if grounding else None,
+        if should_search:
+            grounding = await _run_explicit_web_search(
+                user_message, tool_trace, messages, search_query=search_query
             )
-            tool_trace.extend(fallback_trace)
-            return fallback_text, tool_trace
-        content, tool_calls = _normalize_hf_response(resp)
-        if tool_calls:
-            messages.append({"role": "assistant", "content": content})
-            for call in tool_calls:
-                name = str(call.get("name", ""))
-                args = call.get("args", {})
-                if not isinstance(args, dict):
-                    args = {}
+
+        for _ in range(max_rounds):
+            try:
+                resp = await _hf_chat(messages, registry.get_openai_schemas())
+            except Exception:
+                fallback_text, fallback_trace = await _fallback_oss_response(
+                    user_message,
+                    registry,
+                    grounding=grounding,
+                    search_query=search_query if grounding else None,
+                )
+                tool_trace.extend(fallback_trace)
+                span.update(output={"tool_count": len(tool_trace), "fallback": True})
+                return fallback_text, tool_trace
+            content, tool_calls = _normalize_hf_response(resp)
+            if tool_calls:
+                messages.append({"role": "assistant", "content": content})
+                for call in tool_calls:
+                    name = str(call.get("name", ""))
+                    args = call.get("args", {})
+                    if not isinstance(args, dict):
+                        args = {}
+                    result = await registry.dispatch(name, args)
+                    tool_trace.append({"tool": name, "args": args, "result": result})
+                    messages.append({"role": "tool", "content": result})
+                continue
+
+            react = _extract_react_tool_call(content)
+            if react is not None:
+                name, args = react
                 result = await registry.dispatch(name, args)
                 tool_trace.append({"tool": name, "args": args, "result": result})
-                messages.append({"role": "tool", "content": result})
-            continue
+                observation = f"Observation: {result}"
+                messages.append({"role": "assistant", "content": f"{content}\n{observation}"})
+                continue
 
-        react = _extract_react_tool_call(content)
-        if react is not None:
-            name, args = react
-            result = await registry.dispatch(name, args)
-            tool_trace.append({"tool": name, "args": args, "result": result})
-            observation = f"Observation: {result}"
-            messages.append({"role": "assistant", "content": f"{content}\n{observation}"})
-            continue
+            final_match = re.search(r"Final Answer:\s*(.+)", content, flags=re.DOTALL)
+            if final_match:
+                final_text = final_match.group(1).strip()
+                span.update(output={"tool_count": len(tool_trace), "response_preview": final_text[:300]})
+                return final_text, tool_trace
+            final_text = content.strip()
+            span.update(output={"tool_count": len(tool_trace), "response_preview": final_text[:300]})
+            return final_text, tool_trace
 
-        final_match = re.search(r"Final Answer:\s*(.+)", content, flags=re.DOTALL)
-        if final_match:
-            return final_match.group(1).strip(), tool_trace
-        return content.strip(), tool_trace
-
-    return "I reached the maximum tool-call rounds for this turn.", tool_trace
+        final_text = "I reached the maximum tool-call rounds for this turn."
+        span.update(output={"tool_count": len(tool_trace), "response_preview": final_text})
+        return final_text, tool_trace

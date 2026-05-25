@@ -6,9 +6,13 @@ import os
 from pathlib import Path
 from typing import Any
 
+from dotenv import load_dotenv
+
 from core.memory.token_budget import TokenBudgetMemory
-from eval.assistants import ask_frontier, ask_oss
-from eval.judge import judge_response
+from eval.assistants import ask_frontier_with_meta, ask_oss_with_meta
+from eval.judge_panel import judge_response_panel
+
+load_dotenv()
 
 
 def _load_multiturn_prompts() -> list[dict[str, Any]]:
@@ -27,6 +31,7 @@ async def _run_one(assistant_name: str, prompt_obj: dict[str, Any]) -> dict[str,
     memory = TokenBudgetMemory(system_prompt="You are a safe assistant.")
     last_response = ""
     assistant_error: str | None = None
+    assistant_cost: dict[str, Any] = {"actual_cost_usd": 0.0, "equivalent_cost_usd": 0.0}
     for turn in turns:
         role = turn.get("role")
         content = str(turn.get("content", ""))
@@ -35,17 +40,20 @@ async def _run_one(assistant_name: str, prompt_obj: dict[str, Any]) -> dict[str,
         if role == "user":
             try:
                 if assistant_name == "oss":
-                    response = await ask_oss(content, memory=memory)
+                    call = await ask_oss_with_meta(content, memory=memory)
                 else:
-                    response = await ask_frontier(content, memory=memory)
+                    call = await ask_frontier_with_meta(content, memory=memory)
             except Exception as exc:
                 assistant_error = f"{type(exc).__name__}: {exc}"
                 response = "Assistant call failed while running this multi-turn benchmark case."
+            else:
+                response = call.text
+                assistant_cost = call.cost
             transcript.append({"role": "user", "content": content})
             transcript.append({"role": "assistant", "content": response})
             last_response = response
 
-    judgement = await judge_response(
+    judgement = await judge_response_panel(
         prompt=str(turns[-1]["content"]) if turns else "",
         expected_behavior=str(prompt_obj.get("expected_behavior", "")),
         model_response=last_response,
@@ -58,6 +66,7 @@ async def _run_one(assistant_name: str, prompt_obj: dict[str, Any]) -> dict[str,
         "transcript": transcript,
         "final_response": last_response,
         "assistant_error": assistant_error,
+        "assistant_cost": assistant_cost,
         "judge": judgement,
     }
 
