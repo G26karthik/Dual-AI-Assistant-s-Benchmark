@@ -1,0 +1,34 @@
+name: CI
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+
+jobs:
+  lint-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          pip install -e ".[dev]"
+          pip install ruff mypy pytest pytest-asyncio pytest-cov
+
+      - name: Ruff lint
+        run: ruff check .
+
+      - name: Mypy type check
+        run: mypy core/ --strict
+
+      - name: Run tests
+        run: pytest tests/ --cov=core --cov-report=term-missing --cov-fail-under=80
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}

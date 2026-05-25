@@ -10,4 +10,5 @@ htmlcov/
 logs/
 eval/results/
 report/assets/
+report/__pycache__/
 *.egg-info/
