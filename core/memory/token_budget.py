@@ -41,6 +41,31 @@ class TokenBudgetMemory:
         except Exception:
             return None
 
+    def __getstate__(self) -> dict[str, Any]:
+        # Gradio deepcopy/pickle support: drop lock/encoder and restore on load.
+        return {
+            "budget_tokens": self.budget_tokens,
+            "system_prompt": self.system_prompt,
+            "model": self.model,
+            "history": list(self._history),
+        }
+
+    def __setstate__(self, state: dict[str, Any]) -> None:
+        self.budget_tokens = int(state.get("budget_tokens", 4096))
+        self.system_prompt = str(state.get("system_prompt", ""))
+        self.model = str(state.get("model", "cl100k_base"))
+        history = state.get("history", [])
+        self._history = []
+        if isinstance(history, list):
+            for item in history:
+                if isinstance(item, dict) and "role" in item and "content" in item:
+                    role = str(item["role"])
+                    if role in {"user", "assistant"}:
+                        self._history.append({"role": role, "content": str(item["content"])})
+        self._lock = Lock()
+        self._encoder = self._build_encoder(self.model)
+        self._enforce_budget()
+
     def _count_text_tokens(self, text: str) -> int:
         if self._encoder is None:
             # Heuristic fallback for environments without tiktoken or unknown encodings.

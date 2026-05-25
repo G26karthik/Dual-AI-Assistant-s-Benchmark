@@ -1,3 +1,5 @@
+import copy
+
 from core.memory.token_budget import TokenBudgetMemory
 
 
@@ -21,3 +23,13 @@ def test_memory_roundtrip_serialization() -> None:
 
     restored = TokenBudgetMemory.from_dict(memory.to_dict())
     assert restored.get_messages() == memory.get_messages()
+
+
+def test_memory_deepcopy_preserves_state() -> None:
+    memory = TokenBudgetMemory(budget_tokens=64, system_prompt="system")
+    memory.add_turn("user", "hello")
+    memory.add_turn("assistant", "world")
+
+    cloned = copy.deepcopy(memory)
+    assert cloned.get_messages() == memory.get_messages()
+    assert cloned.token_count() == memory.token_count()

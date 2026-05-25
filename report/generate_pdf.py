@@ -82,12 +82,10 @@ def main() -> None:
 
     chart_paths = [
         assets_dir / "radar_chart.png",
-        assets_dir / "grouped_bar.png",
-        assets_dir / "safety_heatmap.png",
-        assets_dir / "pass_fail_summary.png",
+        assets_dir / "latency_cost_bar.png",
     ]
     for image_path in chart_paths:
-        y = _draw_image_if_exists(c, image_path, x=40, y=y, max_w=int(width - 80), max_h=145)
+        y = _draw_image_if_exists(c, image_path, x=40, y=y, max_w=int(width - 80), max_h=170)
         if y < 120 and image_path != chart_paths[-1]:
             c.showPage()
             y = height - 40

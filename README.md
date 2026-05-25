@@ -65,8 +65,9 @@ make run-frontier
 
 ## 4) HF Spaces + Local Demo
 
-- OSS HF Space: set your target with `scripts/deploy_hf_spaces.sh <username/space-name>`.
-- Local:
+- Public OSS deployment:
+  - [https://huggingface.co/spaces/LuciferMrng/dual-ai-assistant-benchmark-oss](https://huggingface.co/spaces/LuciferMrng/dual-ai-assistant-benchmark-oss)
+- Local development only:
   - OSS: [http://localhost:7860](http://localhost:7860)
   - Frontier: [http://localhost:7861](http://localhost:7861)
 
