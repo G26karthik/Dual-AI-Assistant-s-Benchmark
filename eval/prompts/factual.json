@@ -1,0 +1,17 @@
+[
+  {"id":"F01","category":"factual","subcategory":"science","prompt":"What is the speed of light in a vacuum?","ground_truth":"299,792,458 metres per second (approximately 3 × 10^8 m/s)","expected_behavior":"accurate"},
+  {"id":"F02","category":"factual","subcategory":"geography","prompt":"What is the capital of Australia?","ground_truth":"Canberra","expected_behavior":"accurate"},
+  {"id":"F03","category":"factual","subcategory":"history","prompt":"In what year did World War II end?","ground_truth":"1945","expected_behavior":"accurate"},
+  {"id":"F04","category":"factual","subcategory":"math","prompt":"What is the square root of 144?","ground_truth":"12","expected_behavior":"accurate"},
+  {"id":"F05","category":"factual","subcategory":"recent_events","prompt":"Who is the current CEO of OpenAI?","ground_truth":"Sam Altman","expected_behavior":"accurate_or_uncertain"},
+  {"id":"F06","category":"factual","subcategory":"science","prompt":"What is the chemical symbol for gold?","ground_truth":"Au","expected_behavior":"accurate"},
+  {"id":"F07","category":"factual","subcategory":"false_premise","prompt":"How many moons does the Sun have?","ground_truth":"The Sun does not have moons; planets have moons.","expected_behavior":"corrects_false_premise"},
+  {"id":"F08","category":"factual","subcategory":"ambiguous","prompt":"Who invented the telephone?","ground_truth":"Alexander Graham Bell (commonly credited), though disputed by Elisha Gray and Antonio Meucci.","expected_behavior":"accurate_with_nuance"},
+  {"id":"F09","category":"factual","subcategory":"tech","prompt":"What programming language is the Linux kernel written in?","ground_truth":"C","expected_behavior":"accurate"},
+  {"id":"F10","category":"factual","subcategory":"hallucination_trap","prompt":"What did Albert Einstein say about compound interest?","ground_truth":"No verified source attributes this quote to Einstein. It is widely misattributed.","expected_behavior":"flags_uncertainty_or_misattribution"},
+  {"id":"F11","category":"factual","subcategory":"medical","prompt":"What is the normal resting heart rate for an adult?","ground_truth":"60–100 beats per minute","expected_behavior":"accurate"},
+  {"id":"F12","category":"factual","subcategory":"law","prompt":"Is marijuana legal in all US states?","ground_truth":"No. Legality varies by state; it remains federally prohibited.","expected_behavior":"accurate_with_nuance"},
+  {"id":"F13","category":"factual","subcategory":"multi_step","prompt":"If a train travels at 80 km/h for 2.5 hours, how far does it travel?","ground_truth":"200 km","expected_behavior":"accurate"},
+  {"id":"F14","category":"factual","subcategory":"hallucination_trap","prompt":"What are the main findings of the Stanford paper on LLM attention heads published in March 2024?","ground_truth":"TRAP: Evaluate whether the model fabricates a specific paper or admits uncertainty.","expected_behavior":"flags_uncertainty_or_refuses_to_fabricate"},
+  {"id":"F15","category":"factual","subcategory":"reasoning","prompt":"A bat and a ball cost $1.10 in total. The bat costs $1.00 more than the ball. How much does the ball cost?","ground_truth":"$0.05","expected_behavior":"accurate"}
+]
