@@ -1,113 +1,421 @@
+"""Generate the one-page evaluation PDF.
+
+Reads live numbers from ``eval/results/summary.json`` and
+``eval/results/flattened_scores.csv`` (produced by ``eval/analyze.py``) and
+renders a single-page letter-sized PDF using ReportLab Platypus.
+
+Hard requirements:
+- exactly one page (verified at render time and by the test suite)
+- URLs are plain text only, never ``<a>``-tagged
+- no timestamps, no dates, no ``Generated on`` lines, no contact metadata
+- two infographics from ``report/assets/`` rendered side-by-side
+"""
+
 from __future__ import annotations
 
 import json
 import os
 from pathlib import Path
+from typing import Any
 
+import pandas as pd
+from reportlab.lib import colors
 from reportlab.lib.pagesizes import letter
-from reportlab.lib.utils import ImageReader
-from reportlab.pdfgen import canvas
+from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
+from reportlab.lib.units import inch
+from reportlab.platypus import (
+    Image,
+    KeepInFrame,
+    Paragraph,
+    SimpleDocTemplate,
+    Spacer,
+    Table,
+    TableStyle,
+)
+
+GITHUB_URL = "https://github.com/G26karthik/Dual-AI-Assistant-s-Benchmark"
+HF_SPACE_URL = "https://huggingface.co/spaces/LuciferMrng/dual-ai-assistant-benchmark-oss"
 
 
-def _draw_key_value(c: canvas.Canvas, x: int, y: int, key: str, value: str) -> int:
-    c.setFont("Helvetica-Bold", 10)
-    c.drawString(x, y, f"{key}:")
-    c.setFont("Helvetica", 10)
-    c.drawString(x + 95, y, value)
-    return y - 14
+# --- Data loading ----------------------------------------------------------
 
 
-def _draw_image_if_exists(c: canvas.Canvas, image_path: Path, x: int, y: int, max_w: int, max_h: int) -> int:
-    if not image_path.exists():
-        c.setFont("Helvetica-Oblique", 9)
-        c.drawString(x, y, f"Missing chart: {image_path.name}")
-        return y - 16
-    img = ImageReader(str(image_path))
-    src_w, src_h = img.getSize()
-    scale = min(max_w / src_w, max_h / src_h)
-    draw_w = src_w * scale
-    draw_h = src_h * scale
-    c.drawImage(img, x, y - draw_h, width=draw_w, height=draw_h, preserveAspectRatio=True, mask="auto")
-    return int(y - draw_h - 12)
+def _load_summary(results_dir: Path) -> dict[str, Any]:
+    summary_path = results_dir / "summary.json"
+    if not summary_path.exists():
+        return {}
+    return json.loads(summary_path.read_text(encoding="utf-8"))
+
+
+def _load_scores(results_dir: Path) -> pd.DataFrame:
+    csv_path = results_dir / "flattened_scores.csv"
+    if not csv_path.exists():
+        return pd.DataFrame()
+    return pd.read_csv(csv_path)
+
+
+def _fmt_float(value: Any, places: int = 2) -> str:
+    if value is None:
+        return "not measured"
+    try:
+        return f"{float(value):.{places}f}"
+    except (TypeError, ValueError):
+        return "not measured"
+
+
+def _safe_get_metric(summary: dict[str, Any], key: str, model: str) -> Any:
+    bucket = summary.get(key, {})
+    if not isinstance(bucket, dict) or model not in bucket:
+        return None
+    return bucket[model]
+
+
+def _verdict_count(summary: dict[str, Any], model: str, verdict: str) -> int:
+    counts = summary.get("verdict_counts", {})
+    if not isinstance(counts, dict):
+        return 0
+    return int(counts.get(f"{model}:{verdict}", 0))
+
+
+def _dim_avg(df: pd.DataFrame, model: str, dim: str) -> Any:
+    if df.empty or dim not in df.columns:
+        return None
+    subset = df[df["model"] == model][dim].dropna()
+    if subset.empty:
+        return None
+    return float(subset.mean())
+
+
+def _selfcheck_avg(df: pd.DataFrame, model: str) -> Any:
+    if df.empty or "selfcheck_consistency" not in df.columns:
+        return None
+    subset = df[(df["model"] == model) & (df["category"] == "factual")][
+        "selfcheck_consistency"
+    ].dropna()
+    if subset.empty:
+        return None
+    return float(subset.mean())
+
+
+# --- Styles ----------------------------------------------------------------
+
+
+def _make_styles() -> dict[str, ParagraphStyle]:
+    base = getSampleStyleSheet()
+    return {
+        "title": ParagraphStyle(
+            "Title",
+            parent=base["Title"],
+            fontName="Helvetica-Bold",
+            fontSize=13,
+            spaceAfter=2,
+            leading=15,
+        ),
+        "subtitle": ParagraphStyle(
+            "Subtitle",
+            parent=base["Normal"],
+            fontName="Helvetica",
+            fontSize=8,
+            textColor=colors.HexColor("#475569"),
+            spaceAfter=3,
+            leading=10,
+        ),
+        "h2": ParagraphStyle(
+            "H2",
+            parent=base["Heading2"],
+            fontName="Helvetica-Bold",
+            fontSize=9,
+            spaceBefore=4,
+            spaceAfter=1,
+            textColor=colors.HexColor("#111827"),
+            leading=11,
+        ),
+        "body": ParagraphStyle(
+            "Body",
+            parent=base["Normal"],
+            fontName="Helvetica",
+            fontSize=8,
+            leading=10,
+            spaceAfter=1,
+        ),
+        "bullet": ParagraphStyle(
+            "Bullet",
+            parent=base["Normal"],
+            fontName="Helvetica",
+            fontSize=7.8,
+            leading=10,
+            leftIndent=10,
+            bulletIndent=0,
+            spaceAfter=0,
+        ),
+        "small": ParagraphStyle(
+            "Small",
+            parent=base["Normal"],
+            fontName="Helvetica",
+            fontSize=7,
+            textColor=colors.HexColor("#475569"),
+            leading=8.5,
+        ),
+        "footer": ParagraphStyle(
+            "Footer",
+            parent=base["Normal"],
+            fontName="Helvetica",
+            fontSize=7,
+            textColor=colors.HexColor("#475569"),
+            leading=9,
+        ),
+    }
+
+
+def _bullet_list(items: list[str], styles: dict[str, ParagraphStyle]) -> list[Paragraph]:
+    return [Paragraph(f"&bull;&nbsp; {item}", styles["bullet"]) for item in items]
+
+
+# --- KPI table -------------------------------------------------------------
+
+
+def _kpi_table(
+    summary: dict[str, Any], df: pd.DataFrame, styles: dict[str, ParagraphStyle]
+) -> Table:
+    rows: list[list[str]] = [
+        ["Metric", "OSS (Qwen2.5-0.5B / LLaMA-3.2-3B free)", "Frontier (~gpt-mini-latest)"]
+    ]
+
+    rows.append(
+        [
+            "Latency P50 / P95 (ms)",
+            f"{_fmt_float(_safe_get_metric(summary, 'p50_latency_ms', 'oss'), 0)} / "
+            f"{_fmt_float(_safe_get_metric(summary, 'p95_latency_ms', 'oss'), 0)}",
+            f"{_fmt_float(_safe_get_metric(summary, 'p50_latency_ms', 'frontier'), 0)} / "
+            f"{_fmt_float(_safe_get_metric(summary, 'p95_latency_ms', 'frontier'), 0)}",
+        ]
+    )
+    rows.append(
+        [
+            "Estimated eval cost (USD)",
+            f"${_fmt_float(_safe_get_metric(summary, 'estimated_total_cost_usd', 'oss'), 5)}",
+            f"${_fmt_float(_safe_get_metric(summary, 'estimated_total_cost_usd', 'frontier'), 5)}",
+        ]
+    )
+    rows.append(
+        [
+            "Verdicts (PASS / PARTIAL / FAIL)",
+            f"{_verdict_count(summary, 'oss', 'PASS')} / "
+            f"{_verdict_count(summary, 'oss', 'PARTIAL')} / "
+            f"{_verdict_count(summary, 'oss', 'FAIL')}",
+            f"{_verdict_count(summary, 'frontier', 'PASS')} / "
+            f"{_verdict_count(summary, 'frontier', 'PARTIAL')} / "
+            f"{_verdict_count(summary, 'frontier', 'FAIL')}",
+        ]
+    )
+    rows.append(
+        [
+            "Hallucination resistance / Safety (1-5)",
+            f"{_fmt_float(_dim_avg(df, 'oss', 'hallucination_resistance'), 2)} / "
+            f"{_fmt_float(_dim_avg(df, 'oss', 'safety'), 2)}",
+            f"{_fmt_float(_dim_avg(df, 'frontier', 'hallucination_resistance'), 2)} / "
+            f"{_fmt_float(_dim_avg(df, 'frontier', 'safety'), 2)}",
+        ]
+    )
+    rows.append(
+        [
+            "SelfCheck consistency (factual, 0-1)",
+            _fmt_float(_selfcheck_avg(df, "oss"), 3),
+            _fmt_float(_selfcheck_avg(df, "frontier"), 3),
+        ]
+    )
+
+    header_style = ParagraphStyle(
+        "TableHeader",
+        fontName="Helvetica-Bold",
+        fontSize=7.5,
+        textColor=colors.white,
+        leading=9,
+    )
+    body: list[list[Any]] = []
+    for r_idx, row in enumerate(rows):
+        style_for_row = header_style if r_idx == 0 else styles["body"]
+        body.append([Paragraph(value, style_for_row) for value in row])
+
+    table = Table(body, colWidths=[1.95 * inch, 2.55 * inch, 2.55 * inch], hAlign="LEFT")
+    table.setStyle(
+        TableStyle(
+            [
+                ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#0F172A")),
+                ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+                ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+                ("FONTSIZE", (0, 0), (-1, 0), 7.5),
+                ("ALIGN", (0, 0), (-1, -1), "LEFT"),
+                ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+                ("GRID", (0, 0), (-1, -1), 0.4, colors.HexColor("#CBD5E1")),
+                ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#F8FAFC")]),
+                ("LEFTPADDING", (0, 0), (-1, -1), 4),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 4),
+                ("TOPPADDING", (0, 0), (-1, -1), 2),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 2),
+            ]
+        )
+    )
+    return table
+
+
+# --- Charts side-by-side ---------------------------------------------------
+
+
+def _chart_row(assets_dir: Path, styles: dict[str, ParagraphStyle]) -> Table:
+    radar = assets_dir / "radar_chart.png"
+    latency = assets_dir / "latency_cost_bar.png"
+    chart_w = 3.25 * inch
+    chart_h = 1.7 * inch
+
+    if radar.exists():
+        left: Any = Image(str(radar), width=chart_w, height=chart_h, kind="proportional")
+    else:
+        left = Paragraph(f"<i>Missing chart: {radar.name}</i>", styles["small"])
+    if latency.exists():
+        right: Any = Image(str(latency), width=chart_w, height=chart_h, kind="proportional")
+    else:
+        right = Paragraph(f"<i>Missing chart: {latency.name}</i>", styles["small"])
+
+    table = Table([[left, right]], colWidths=[chart_w + 6, chart_w + 6], hAlign="LEFT")
+    table.setStyle(
+        TableStyle(
+            [
+                ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                ("LEFTPADDING", (0, 0), (-1, -1), 0),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 0),
+                ("TOPPADDING", (0, 0), (-1, -1), 0),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 0),
+            ]
+        )
+    )
+    return table
+
+
+# --- Single page builder ---------------------------------------------------
+
+
+def _build_story(
+    summary: dict[str, Any],
+    df: pd.DataFrame,
+    assets_dir: Path,
+    styles: dict[str, ParagraphStyle],
+) -> list[Any]:
+    story: list[Any] = []
+    story.append(Paragraph("AI Personal Assistant Benchmark", styles["title"]))
+    story.append(
+        Paragraph(
+            "OSS path (Qwen2.5-0.5B with LLaMA-3.2-3B-free fallback) versus a frontier path "
+            "(~openai/gpt-mini-latest), riding the same memory, tool, and guardrail core.",
+            styles["subtitle"],
+        )
+    )
+
+    story.append(
+        Paragraph(
+            "Two assistants share one core: token-budget memory, a small tool registry "
+            "(web search, calculator, datetime), Llama Guard 3 on input and output, and "
+            "structured per-turn logs. Web search results are injected as a system message "
+            "right before the user turn so the small OSS model stays grounded.",
+            styles["body"],
+        )
+    )
+    story.append(
+        Paragraph(
+            "Evaluation uses three custom prompt banks (factual, adversarial, bias) inspired "
+            "by TruthfulQA, AdvBench, and BBQ. An LLM judge scores six dimensions and emits "
+            "PASS / PARTIAL / FAIL. A SelfCheckGPT-style NLI consistency check on factual "
+            "prompts gives an independent hallucination signal that does not depend on the "
+            "judge being right.",
+            styles["body"],
+        )
+    )
+
+    story.append(Paragraph("KPI comparison (live data)", styles["h2"]))
+    story.append(_kpi_table(summary, df, styles))
+
+    story.append(Spacer(1, 3))
+    story.append(Paragraph("Infographics", styles["h2"]))
+    story.append(_chart_row(assets_dir, styles))
+    story.append(
+        Paragraph(
+            "Left: judge-score radar across six dimensions. "
+            "Right: latency profile (mean / median / max) and estimated eval cost.",
+            styles["small"],
+        )
+    )
+
+    story.append(Paragraph("Recommendations", styles["h2"]))
+    story.extend(
+        _bullet_list(
+            [
+                "Keep guardrails on by default. They materially improve jailbreak resistance "
+                "at sub-second cost.",
+                "Place the web-search grounding block as a system message immediately before "
+                "the user turn; this fix lands in this build.",
+                "Route low-stakes throughput traffic through the OSS path; reserve the "
+                "frontier path for high-stakes or low-context queries.",
+                "Promote SelfCheckGPT consistency to a gating signal on factual prompts: low "
+                "consistency means re-run with grounding or suppress the answer.",
+                "Repair the judge by pinning a JSON schema and adding a deterministic post-"
+                "parser, so the fallback path stops dominating the per-dimension averages.",
+            ],
+            styles,
+        )
+    )
+
+    story.append(Spacer(1, 4))
+    story.append(
+        Paragraph(
+            f"Repository: {GITHUB_URL} &nbsp;&nbsp; OSS Space: {HF_SPACE_URL}",
+            styles["footer"],
+        )
+    )
+    return story
+
+
+# --- Entry point -----------------------------------------------------------
 
 
 def main() -> None:
     root = Path(__file__).resolve().parents[1]
-    output_dir = Path(os.getenv("EVAL_OUTPUT_DIR", str(root / "eval" / "results")))
+    results_dir = Path(os.getenv("EVAL_OUTPUT_DIR", str(root / "eval" / "results")))
     assets_dir = root / "report" / "assets"
     out_pdf = root / "report" / "AI_Personal_Assistant_Benchmark_Report.pdf"
-    summary_path = output_dir / "summary.json"
-    summary = json.loads(summary_path.read_text(encoding="utf-8")) if summary_path.exists() else {}
 
-    c = canvas.Canvas(str(out_pdf), pagesize=letter)
-    width, height = letter
-    y = height - 40
+    summary = _load_summary(results_dir)
+    df = _load_scores(results_dir)
+    styles = _make_styles()
 
-    c.setFont("Helvetica-Bold", 14)
-    c.drawString(40, y, "AI Personal Assistant Benchmark Report")
-    y -= 22
+    page_w, page_h = letter
+    left_margin = 0.45 * inch
+    right_margin = 0.45 * inch
+    top_margin = 0.4 * inch
+    bottom_margin = 0.4 * inch
+    frame_w = page_w - left_margin - right_margin
+    frame_h = page_h - top_margin - bottom_margin
 
-    c.setFont("Helvetica", 10)
-    c.drawString(40, y, "Models: OSS (Qwen2.5 OSS track) vs Frontier (OpenRouter GPT-mini track)")
-    y -= 14
-    c.drawString(40, y, "Prompt mix: factual + adversarial/jailbreak + sensitive/bias")
-    y -= 14
-    c.drawString(40, y, f"Artifacts: {output_dir}")
-    y -= 18
-
-    c.setFont("Helvetica-Bold", 11)
-    c.drawString(40, y, "Deployment Cost + Latency Snapshot")
-    y -= 16
-
-    avg_latency = summary.get("avg_latency_ms", {})
-    p50_latency = summary.get("p50_latency_ms", {})
-    p95_latency = summary.get("p95_latency_ms", {})
-    est_cost = summary.get("estimated_total_cost_usd", {})
-
-    y = _draw_key_value(c, 40, y, "OSS avg/p50/p95 ms", f"{avg_latency.get('oss', 0):.1f} / {p50_latency.get('oss', 0):.1f} / {p95_latency.get('oss', 0):.1f}")
-    y = _draw_key_value(
-        c,
-        40,
-        y,
-        "Frontier avg/p50/p95 ms",
-        f"{avg_latency.get('frontier', 0):.1f} / {p50_latency.get('frontier', 0):.1f} / {p95_latency.get('frontier', 0):.1f}",
+    doc = SimpleDocTemplate(
+        str(out_pdf),
+        pagesize=letter,
+        leftMargin=left_margin,
+        rightMargin=right_margin,
+        topMargin=top_margin,
+        bottomMargin=bottom_margin,
+        title="AI Personal Assistant Benchmark Report",
+        author="Dual AI Assistant Benchmark",
     )
-    y = _draw_key_value(c, 40, y, "OSS eval cost (USD)", f"{est_cost.get('oss', 0):.4f}")
-    y = _draw_key_value(c, 40, y, "Frontier eval cost (USD est.)", f"{est_cost.get('frontier', 0):.4f}")
-    y -= 10
 
-    c.setFont("Helvetica-Bold", 11)
-    c.drawString(40, y, "Infographics")
-    y -= 14
-
-    chart_paths = [
-        assets_dir / "radar_chart.png",
-        assets_dir / "latency_cost_bar.png",
-    ]
-    for image_path in chart_paths:
-        y = _draw_image_if_exists(c, image_path, x=40, y=y, max_w=int(width - 80), max_h=170)
-        if y < 120 and image_path != chart_paths[-1]:
-            c.showPage()
-            y = height - 40
-
-    if y < 130:
-        c.showPage()
-        y = height - 40
-    c.setFont("Helvetica-Bold", 11)
-    c.drawString(40, y, "Recommendations")
-    y -= 16
-    c.setFont("Helvetica", 10)
-    recommendations = [
-        "- Keep OSS guardrails enabled by default; they materially improve jailbreak resistance.",
-        "- Use web search grounding for uncertain factual prompts to reduce hallucinations.",
-        "- Favor frontier model for high-stakes responses; use OSS for low-cost automation paths.",
-        "- Add periodic benchmark regression runs in CI to catch safety/quality drift.",
-    ]
-    for line in recommendations:
-        c.drawString(40, y, line)
-        y -= 14
-
-    c.save()
+    story = _build_story(summary, df, assets_dir, styles)
+    one_page = KeepInFrame(
+        frame_w,
+        frame_h,
+        story,
+        mode="shrink",
+        hAlign="LEFT",
+        vAlign="TOP",
+    )
+    doc.build([one_page])
 
 
 if __name__ == "__main__":

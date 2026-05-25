@@ -12,3 +12,5 @@ eval/results/
 report/assets/
 report/__pycache__/
 *.egg-info/
+.hf-space-deploy/
+.hf-upload-tmp/

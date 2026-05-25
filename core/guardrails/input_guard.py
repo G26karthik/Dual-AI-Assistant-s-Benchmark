@@ -34,7 +34,10 @@ def parse_violated_category(response: str) -> str | None:
 
 async def llama_guard_check(text: str, role: Literal["user", "agent"]) -> GuardResult:
     model = os.getenv("LLAMA_GUARD_MODEL_ID", "meta-llama/Llama-Guard-3-1B")
-    client = AsyncInferenceClient(model=model, token=os.getenv("HF_TOKEN"))
+    inference_token = os.getenv("HF_INFERENCE_TOKEN") or None
+    if inference_token is None:
+        raise RuntimeError("HF_INFERENCE_TOKEN is not configured for Llama Guard inference.")
+    client = AsyncInferenceClient(model=model, token=inference_token)
     prompt = format_llama_guard_prompt(text, role)
     response = await client.text_generation(prompt, max_new_tokens=20)
     normalized = response.strip().lower()
@@ -51,6 +54,10 @@ async def llama_guard_check(text: str, role: Literal["user", "agent"]) -> GuardR
 class InputGuard:
     def __init__(self) -> None:
         self.max_input_tokens = int(os.getenv("MAX_INPUT_TOKENS", "1024"))
+        self._dangerous_pattern = re.compile(
+            r"\b(bomb|bombs|explosive|explosives|molotov|detonator|poison|how to kill|make a weapon|build a gun)\b",
+            flags=re.IGNORECASE,
+        )
 
     @staticmethod
     def _token_len(text: str) -> int:
@@ -93,6 +100,14 @@ class InputGuard:
             return GuardResult(
                 allowed=False,
                 reason="Potential prompt injection detected",
+                pii_detected=pii_detected,
+                injection_score=injection_score,
+            )
+
+        if self._dangerous_pattern.search(text):
+            return GuardResult(
+                allowed=False,
+                reason="Disallowed harmful intent detected",
                 pii_detected=pii_detected,
                 injection_score=injection_score,
             )
