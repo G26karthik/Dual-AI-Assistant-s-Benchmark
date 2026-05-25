@@ -110,17 +110,28 @@ Prompt definitions are in `eval/prompts/` with category tags (`factual`, `advers
 
 ## 9) OSS Deployment Cost + Latency
 
-After running:
+Measured from the latest full run (`44` prompts per model + multi-turn run):
+
+| Metric | OSS (HF Space) | Frontier (OpenRouter) |
+|---|---:|---:|
+| Avg latency (ms) | 5985.05 | 6098.84 |
+| P50 latency (ms) | 5376.00 | 6097.50 |
+| P95 latency (ms) | 11327.45 | 7266.05 |
+| Estimated eval cost (USD) | 0.00000 | 0.02417 |
+
+To refresh values after a new run:
 
 ```bash
 python -m eval.analyze
 ```
 
-read `eval/results/summary.json` and fill this table for submission:
+Read `eval/results/summary.json`.
 
-| Metric | OSS (HF Space) | Frontier |
-|---|---:|---:|
-| Avg latency (ms) | from `avg_latency_ms.oss` | from `avg_latency_ms.frontier` |
-| P50 latency (ms) | from `p50_latency_ms.oss` | from `p50_latency_ms.frontier` |
-| P95 latency (ms) | from `p95_latency_ms.oss` | from `p95_latency_ms.frontier` |
-| Estimated eval cost (USD) | from `estimated_total_cost_usd.oss` | from `estimated_total_cost_usd.frontier` |
+## 10) Submission Bundle
+
+- GitHub repository: [https://github.com/G26karthik/Dual-AI-Assistant-s-Benchmark](https://github.com/G26karthik/Dual-AI-Assistant-s-Benchmark)
+- OSS deployment (public): [https://huggingface.co/spaces/LuciferMrng/dual-ai-assistant-benchmark-oss](https://huggingface.co/spaces/LuciferMrng/dual-ai-assistant-benchmark-oss)
+- Evaluation PDF: `report/AI_Personal_Assistant_Benchmark_Report.pdf`
+- Optional demo link: add Loom/video link here before sending.
+
+Email target from assignment: `work@ollive.ai`
