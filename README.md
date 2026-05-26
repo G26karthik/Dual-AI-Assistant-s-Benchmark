@@ -243,8 +243,10 @@ rows if they are enabled. It resamples responses and scores pairwise
 entailment with a `cross-encoder/nli-deberta-v3-small` head. The output is a
 0–1 consistency score plus a categorical verdict.
 
-Verdicts collapse to `PASS / PARTIAL / FAIL`. Anything unrecognised is
-normalised to `PARTIAL` so the dashboard can't lie about pass-rate.
+Verdicts stay public as `PASS / PARTIAL / FAIL` only. Judge outages are kept
+internal: failed judges do not count as votes, and if the whole panel drops out
+the pipeline falls back to deterministic score thresholds so the report still
+lands on a meaningful public verdict.
 
 ## Evaluation results (live)
 
@@ -256,12 +258,12 @@ The numbers below are read straight from `eval/results/summary.json` and
 | Metric | OSS | Frontier |
 |---|---:|---:|
 | Prompts evaluated | 500 | 500 |
-| Avg latency (ms) | 12 210 | 7 501 |
-| P50 latency (ms) | 7 425 | 6 673 |
-| P95 latency (ms) | 40 535 | 13 136 |
-| Actual eval cost (USD) | 0.00000 | 0.01352 |
-| Equivalent eval cost (USD) | 0.05212 | 0.01395 |
-| Panel agreement rate | 1.00 | 1.00 |
+| Avg latency (ms) | 20 550 | 6 849 |
+| P50 latency (ms) | 8 492 | 5 800 |
+| P95 latency (ms) | 57 159 | 15 036 |
+| Actual eval cost (USD) | 0.00000 | 0.01700 |
+| Equivalent eval cost (USD) | 0.05568 | 0.02224 |
+| Panel agreement rate | 0.98 | 0.95 |
 
 The frontier model is faster at every latency percentile. OSS latency
 is fine at the median but the P95 tail widens considerably, which is the
@@ -273,38 +275,38 @@ token volume would cost on a paid endpoint.
 
 | Model | PASS | PARTIAL | FAIL |
 |---|---:|---:|---:|
-| OSS | 0 | 500 | 0 |
-| Frontier | 0 | 500 | 0 |
+| OSS | 1 | 69 | 430 |
+| Frontier | 11 | 50 | 439 |
 
-All verdicts are PARTIAL. When `EVAL_SKIP_OPENROUTER_JUDGES=true` (the
-free-tier fallback path used here), the lightweight Hugging Face judges return
-the safe default PARTIAL score on almost every row. The verdict column is a
-coarse signal on this run; the per-dimension scores and SelfCheckGPT
-consistency are the meaningful differentiation below.
+The verdict mix is meaningful again instead of collapsing to the midpoint.
+Frontier lands more factual `PASS` rows, but provider-error answers and strict
+fallback scoring drive its overall `FAIL` count to 439. The OSS path keeps
+actual spend at zero, but it still fails most safety-heavy rows under the same
+public scoring rules.
 
 ### Dimension averages
 
 | Dimension | OSS | Frontier |
 |---|---:|---:|
-| Accuracy (factual, 1–5) | 3.00 | 3.00 |
-| Hallucination resistance (1–5) | 3.00 | 3.00 |
-| Safety (1–5) | 4.00 | 4.00 |
-| Bias score (bias bank, 1–5) | 3.00 | 3.00 |
-| Refusal quality (adversarial, 1–5) | 4.00 | 4.00 |
-| Helpfulness (1–5) | 3.00 | 3.00 |
-| SelfCheck consistency (factual, 0–1) | 0.871 | 0.946 |
+| Accuracy (factual, 1–5) | 2.48 | 2.20 |
+| Hallucination resistance (1–5) | 2.50 | 1.67 |
+| Safety (1–5) | 1.75 | 1.72 |
+| Bias score (bias bank, 1–5) | 2.25 | 1.88 |
+| Refusal quality (adversarial, 1–5) | 1.59 | 1.22 |
+| Helpfulness (1–5) | 2.94 | 1.36 |
+| SelfCheck consistency (factual, 0–1) | 0.876 | 0.909 |
 
-The judge panel dimension scores are uniform across this free-tier run, which
-is expected with the lightweight fallback judges. The meaningful signal is
-SelfCheckGPT: the frontier model scores 0.946 vs the OSS model at 0.871 on
-TruthfulQA factual probes, confirming the smaller open-source model is less
-self-consistent when answering the same factual question with different
-samples.
+The repaired panel no longer flattens every row to the same midpoint score.
+Frontier still has slightly stronger factual self-consistency (0.909 vs 0.876),
+but its helpfulness and refusal metrics are dragged down by provider-error
+answers. OSS is a little more helpful on average, yet still weak across the
+safety-oriented suites.
 
 To refresh these numbers, re-run the eval and rebuild the artefacts:
 
 ```bash
 make eval
+python -m eval.rebuild_results
 python -m eval.analyze
 python -m eval.visualize
 python -m report.generate_pdf
